@@ -148,3 +148,71 @@ export async function seedLedgerEntry(
   `;
   return id;
 }
+
+export interface SeedOutboxOptions {
+  readonly eventType?: string;
+  readonly aggregateId?: string;
+  readonly payload?: Record<string, unknown>;
+  readonly occurredAt?: Date;
+  readonly attempts?: number;
+  readonly nextAttemptAt?: Date;
+  readonly claimedBy?: string | null;
+  readonly claimedUntil?: Date | null;
+  readonly publishedAt?: Date | null;
+}
+
+export interface SeededOutboxMessage {
+  readonly id: string;
+  readonly eventId: string;
+  readonly eventType: string;
+  readonly aggregateId: string;
+  readonly payload: Record<string, unknown>;
+}
+
+export async function seedOutboxMessage(
+  sql: SQL,
+  options: SeedOutboxOptions = {},
+): Promise<SeededOutboxMessage> {
+  const id = uuid();
+  const eventId = uuid();
+  const eventType = options.eventType ?? 'WagerTransactionProcessed';
+  const aggregateId = options.aggregateId ?? uuid();
+  const payload = options.payload ?? { eventId, eventType, aggregateId };
+  const occurredAt = options.occurredAt ?? new Date();
+
+  await sql`
+    INSERT INTO outbox_message (
+      id, event_id, aggregate_id, event_type, payload, occurred_at,
+      attempts, next_attempt_at, claimed_by, claimed_until, last_error, published_at
+    ) VALUES (
+      ${id}::uuid, ${eventId}::uuid, ${aggregateId}, ${eventType},
+      ${payload}::jsonb, ${occurredAt},
+      ${options.attempts ?? 0}, ${options.nextAttemptAt ?? occurredAt},
+      ${options.claimedBy ?? null}, ${options.claimedUntil ?? null},
+      NULL, ${options.publishedAt ?? null}
+    )
+  `;
+
+  return { id, eventId, eventType, aggregateId, payload };
+}
+
+export interface OutboxRow {
+  readonly attempts: number;
+  readonly next_attempt_at: Date;
+  readonly claimed_by: string | null;
+  readonly claimed_until: Date | null;
+  readonly last_error: string | null;
+  readonly published_at: Date | null;
+}
+
+export async function readOutboxRow(sql: SQL, id: string): Promise<OutboxRow> {
+  const rows = await sql`
+    SELECT attempts, next_attempt_at, claimed_by, claimed_until, last_error, published_at
+    FROM outbox_message WHERE id = ${id}::uuid
+  `;
+  const row = (rows as OutboxRow[])[0];
+  if (row === undefined) {
+    throw new Error(`outbox_message ${id} não existe`);
+  }
+  return row;
+}

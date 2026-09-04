@@ -18,7 +18,8 @@
     "migrate:down": "bun run scripts/migrate.ts down",
     "migrate:fresh": "bun run scripts/migrate.ts fresh",
     "test": "bun test test/unit",
-    "test:integration": "bun run scripts/test-integration.ts"
+    "test:integration": "bun run scripts/test-integration.ts",
+    "test:concurrency": "bun run scripts/test-concurrency.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.700.0",
@@ -29,6 +30,7 @@
     "@nestjs/core": "^10.4.0",
     "@nestjs/platform-express": "^10.4.0",
     "decimal.js": "^10.4.3",
+    "prom-client": "^15.1.3",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

@@ -1,0 +1,87 @@
+import { GetQueueAttributesCommand, type SQSClient } from '@aws-sdk/client-sqs';
+import type { MikroORM } from '@mikro-orm/postgresql';
+
+import { QueueUrlCache } from '@/infrastructure/messaging/queue-urls';
+
+export interface OutboxState {
+  readonly pending: number;
+  readonly oldestAgeSeconds: number;
+}
+
+export interface OperationalMetricsSource {
+  outboxState(): Promise<OutboxState>;
+  dlqVisibleMessages(): Promise<number>;
+}
+
+interface OutboxStateRow {
+  readonly pending: string;
+  readonly oldest_age_seconds: string;
+}
+
+const OUTBOX_CACHE_MS = 250;
+
+export class PostgresSqsOperationalMetrics implements OperationalMetricsSource {
+  private readonly urls: QueueUrlCache;
+  private outboxCache:
+    | { readonly expiresAt: number; readonly value: Promise<OutboxState> }
+    | undefined;
+
+  constructor(
+    private readonly orm: MikroORM,
+    private readonly sqs: SQSClient,
+    private readonly dlqName: string,
+  ) {
+    this.urls = new QueueUrlCache(sqs);
+  }
+
+  outboxState(): Promise<OutboxState> {
+    const now = Date.now();
+    if (this.outboxCache !== undefined && this.outboxCache.expiresAt > now) {
+      return this.outboxCache.value;
+    }
+
+    const value = this.readOutboxState();
+    this.outboxCache = { expiresAt: now + OUTBOX_CACHE_MS, value };
+    value.catch(() => {
+      if (this.outboxCache?.value === value) {
+        this.outboxCache = undefined;
+      }
+    });
+    return value;
+  }
+
+  async dlqVisibleMessages(): Promise<number> {
+    const result = await this.sqs.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: await this.urls.resolve(this.dlqName),
+        AttributeNames: ['ApproximateNumberOfMessages'],
+      }),
+    );
+    return nonNegativeNumber(result.Attributes?.['ApproximateNumberOfMessages']);
+  }
+
+  private async readOutboxState(): Promise<OutboxState> {
+    const [row] = await this.orm.em.fork().getConnection().execute<OutboxStateRow[]>(
+      `SELECT
+         COUNT(*)::text AS pending,
+         COALESCE(
+           EXTRACT(EPOCH FROM (clock_timestamp() - MIN(occurred_at))),
+           0
+         )::text AS oldest_age_seconds
+       FROM outbox_message
+       WHERE published_at IS NULL`,
+      [],
+      'all',
+    );
+
+    return {
+      pending: nonNegativeNumber(row?.pending),
+      oldestAgeSeconds: nonNegativeNumber(row?.oldest_age_seconds),
+    };
+  }
+}
+
+function nonNegativeNumber(value: string | undefined): number {
+  const parsed = Number(value ?? '0');
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}

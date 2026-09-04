@@ -213,6 +213,7 @@ describe('TST-021 migrations aplicam e revertem', () => {
     expect(byTable.get('inbox_message')).toEqual(['processed_at']);
     expect(byTable.get('wager_transaction')).toEqual([
       'attempts',
+      'expires_at',
       'failure_code',
       'next_attempt_at',
       'processed_at',

@@ -4,8 +4,10 @@ import { Global, Inject, Module, type OnApplicationShutdown } from '@nestjs/comm
 
 import { loadEnv, type AppEnv } from '@/bootstrap/env';
 import { JsonLogger } from './observability/json-logger';
+import { PostgresSqsOperationalMetrics } from './observability/operational-metrics';
+import { PrometheusMetrics } from './observability/prometheus-metrics';
 import { runtimeOrmConfig } from './persistence/orm.config';
-import { APP_ENV, LOGGER, ORM, SQS_CLIENT } from './tokens';
+import { APP_ENV, LOGGER, METRICS, ORM, SQS_CLIENT } from './tokens';
 
 @Global()
 @Module({
@@ -39,8 +41,14 @@ import { APP_ENV, LOGGER, ORM, SQS_CLIENT } from './tokens';
           },
         }),
     },
+    {
+      provide: METRICS,
+      inject: [ORM, SQS_CLIENT, APP_ENV],
+      useFactory: (orm: MikroORM, sqs: SQSClient, env: AppEnv): PrometheusMetrics =>
+        new PrometheusMetrics(new PostgresSqsOperationalMetrics(orm, sqs, env.queues.dlq)),
+    },
   ],
-  exports: [APP_ENV, LOGGER, ORM, SQS_CLIENT],
+  exports: [APP_ENV, LOGGER, METRICS, ORM, SQS_CLIENT],
 })
 export class InfrastructureModule implements OnApplicationShutdown {
   constructor(

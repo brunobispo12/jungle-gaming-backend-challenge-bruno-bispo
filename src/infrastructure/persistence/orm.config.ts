@@ -4,13 +4,14 @@ import { fileURLToPath } from 'node:url';
 import { Migrator } from '@mikro-orm/migrations';
 import { defineConfig, type Options } from '@mikro-orm/postgresql';
 
+import { SCHEMAS } from './rows';
+
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 
 function baseConfig(clientUrl: string): Options {
   return defineConfig({
     clientUrl,
-    entities: [],
-    discovery: { warnWhenNoEntities: false },
+    entities: SCHEMAS,
     debug: false,
     forceUtcTimezone: true,
   });

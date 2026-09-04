@@ -35,8 +35,17 @@ export function payloadHashOf(payload: BusinessPayload): string {
   return createHash('sha256').update(canonicalize(fields), 'utf8').digest('hex');
 }
 
-export function canonicalize(value: Record<string, string>): string {
-  const sorted = Object.keys(value).sort();
-  const entries = sorted.map((key) => `${JSON.stringify(key)}:${JSON.stringify(value[key])}`);
+export function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'null';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalize).join(',')}]`;
+  }
+
+  const source = value as Record<string, unknown>;
+  const entries = Object.keys(source)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalize(source[key])}`);
   return `{${entries.join(',')}}`;
 }

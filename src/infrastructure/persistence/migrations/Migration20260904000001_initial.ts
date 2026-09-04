@@ -352,7 +352,7 @@ export class Migration20260904000001_initial extends Migration {
     this.addSql(`
       GRANT UPDATE (
         status, failure_code, processed_at, reference_transaction_id,
-        result_balance_amount, result_balance_currency, attempts, next_attempt_at
+        result_balance_amount, result_balance_currency, attempts, next_attempt_at, expires_at
       ) ON wager_transaction TO wagering_app;
     `);
 

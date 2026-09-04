@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { InvalidTransactionStateError, InvalidWagerTransactionError } from '@/domain/domain-error';
 import { FailureCode } from '@/domain/failure-code';
 import { Money } from '@/domain/money';
-import { reversalFailure } from '@/domain/reversal';
+import { reversalFailure, winReferenceFailure } from '@/domain/reference';
 import { LedgerDirection, type WalletLedgerEntry } from '@/domain/wallet-ledger-entry';
 import { Wallet } from '@/domain/wallet';
 import {
@@ -455,5 +455,42 @@ describe('Reversões — efeito aplicado na wallet', () => {
     expect(rollback.failureCode).toBe(FailureCode.ReversalWouldOverdraw);
     expect(wallet.balance.toString()).toBe('10.00');
     expect(wallet.version).toBe(1);
+  });
+});
+
+describe('WIN — referência opcional', () => {
+  const win = (overrides: Partial<CreateWagerTransactionProps> = {}): WagerTransaction =>
+    bet({
+      kind: WagerTransactionKind.Win,
+      money: brl('50.00'),
+      referenceExternalTransactionId: 'transaction-123',
+      ...overrides,
+    });
+
+  test('aceita a BET da mesma rodada, mesmo com valor diferente', () => {
+    expect(winReferenceFailure(win(), processed({ money: brl('25.00') }))).toBeUndefined();
+  });
+
+  test('recusa referência que não é BET', () => {
+    for (const kind of [WagerTransactionKind.Win, WagerTransactionKind.Loss]) {
+      expect(winReferenceFailure(win(), processed({ kind }))).toBe(FailureCode.ReferenceMismatch);
+    }
+  });
+
+  test('recusa referência que ainda não foi aplicada', () => {
+    expect(winReferenceFailure(win(), bet())).toBe(FailureCode.ReferenceNotProcessed);
+  });
+
+  test.each([
+    ['player', { playerId: 'player-2' }],
+    ['wallet', { walletId: 'wallet-2' }],
+    ['rodada', { roundId: 'round-000' }],
+  ])('recusa referência de outro %s', (_label, overrides) => {
+    expect(winReferenceFailure(win(), processed(overrides))).toBe(FailureCode.ReferenceMismatch);
+  });
+
+  test('recusa referência em outra moeda', () => {
+    const reference = processed({ money: Money.from({ amount: '25.00', currency: 'USD' }) });
+    expect(winReferenceFailure(win(), reference)).toBe(FailureCode.CurrencyMismatch);
   });
 });
