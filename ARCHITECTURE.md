@@ -348,7 +348,7 @@ Backoff transitório:
 
 O consumer aplicará ChangeMessageVisibility e não apagará a mensagem. Uma mensagem em retry bloqueia temporariamente outras do mesmo walletId; grupos de outras Wallets continuam avançando. Uma indisponibilidade longa pode levar uma mensagem válida à DLQ após cinco recebimentos, exigindo alarme e redrive operacional.
 
-Em SIGTERM, o processo para de chamar ReceiveMessage, concede até 25 s aos itens em voo e reserva uma janela total de 30 s. Ao estourar a graça, devolve visibilidade quando possível. O que não commitou não é marcado como processado.
+O consumer é ativado apenas nas instâncias configuradas para o papel de worker. Durante o graceful shutdown, deixa de buscar novas mensagens, aguarda até 25 s pelos itens em processamento e reserva a janela restante até 30 s para devolver imediatamente a visibilidade dos itens que não concluíram. Mensagens recebidas em lote que ainda não iniciaram processamento também têm a visibilidade devolvida, evitando mantê-las indisponíveis durante o drain. O que não commitou não é marcado como processado.
 
 ## 8. Pending references e reversões
 
@@ -395,6 +395,10 @@ Backoff:
     min(60 s, 1 s × 2^(attempts − 1)) × jitter[0.8,1.2]
 
 Não existe limite terminal para um evento confirmado. attempts serve para telemetria e backoff; o item continua elegível até publicação. Outbox lag crescente gera alerta.
+
+O token do claim é o INSTANCE_ID do processo, o mesmo que identifica a instância nos logs, então uma linha ainda travada aponta para quem a segurava.
+
+O laço reclama uma mensagem por vez. Depois de publicar tenta a próxima imediatamente; sem nada elegível espera 500 ms; depois de um erro inesperado espera 2 s. O desligamento interrompe a espera ociosa em vez de aguardá-la, e o envio em andamento termina antes de o processo sair. Só a instância com o papel outbox-publisher roda o laço, e só o papel api abre porta HTTP; os demais carregam o mesmo binário sem iniciar o laço.
 
 ### 9.2 Janelas de crash
 

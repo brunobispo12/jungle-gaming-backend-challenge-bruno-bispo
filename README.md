@@ -13,13 +13,38 @@ O que existe e roda:
   de imutabilidade e privilégios de runtime separados da credencial de migration;
 - Docker Compose com PostgreSQL 16, LocalStack e três instâncias da aplicação;
 - health checks de liveness e readiness;
+- `GET /metrics` em formato Prometheus, com transações por status, replay e Inbox
+  duplicados, retries, DLQ, espera/conflitos de lock, latência, referências pendentes,
+  reconciliação e backlog/idade da Outbox coletados sem depender dos publishers;
 - o domínio financeiro — `Money` decimal exato, `Wallet`, ledger imutável, ciclo de vida
   da `WagerTransaction` e validação de reversão;
-- 108 testes de unidade do domínio e 37 de integração contra PostgreSQL real.
+- criação de wallet e submissão de wager como casos de uso transacionais, com reserva de
+  idempotência, lock pessimista por wallet, ledger e outbox no mesmo commit;
+- `POST /wallets`, `GET /wallets/:id`, `POST /wagering/transactions` e as duas consultas
+  de transação;
+- `GET /wallets/:id/ledger?cursor=&limit=`: keyset descendente por `(created_at, id)` com
+  cursor opaco, limite padrão 50 e máximo 200 — nunca `OFFSET`, que pularia ou repetiria
+  lançamentos enquanto o cliente percorre as páginas;
+- `POST /wallets/:id/reconciliation`: compara saldo materializado e saldo reconstruído do
+  ledger num único snapshot `REPEATABLE READ READ ONLY`, e reporta a divergência sem
+  corrigir nada;
+- o publisher da outbox: lease entre publishers concorrentes, backoff exponencial com
+  jitter e publicação em `wager-events.fifo` sempre depois do commit;
+- o consumidor de `wager-transactions.fifo`: reusa o mesmo caso de uso do HTTP, deduplica
+  por inbox persistente `(consumerName, messageId)` no mesmo commit da alteração
+  financeira, dá `ack` só depois do commit e separa erro de negócio, transitório e
+  permanente, com backoff por `ChangeMessageVisibility` e envio à DLQ antes do delete;
+- o worker de referências pendentes: tick de 5 s sem líder, `FOR UPDATE SKIP LOCKED` sem
+  lease, backoff exponencial com jitter até 5 min, e encerramento como `REJECTED` ao
+  esgotar o TTL de 6 h ou as 100 tentativas — ou como `FAILED` quando a falha é
+  determinística, em vez de culpar o provedor por um defeito nosso;
+- 174 testes de unidade, 119 de integração e 10 de concorrência com três processos reais
+  contra PostgreSQL e LocalStack reais.
 
-**Ainda não implementados**: os casos de uso, a API de wagering, o consumidor SQS, a
-outbox, o worker de referências pendentes e a reconciliação. Nada abaixo descreve
-comportamento que não tenha sido executado.
+**Ainda não implementados**, todos fora do que o desafio pontua ou marcados como opcionais
+em [`ARCHITECTURE.md`](ARCHITECTURE.md): autenticação (README §2 não pontua; o ponto de
+extensão é `ProviderIdentityPort`), tracing com OpenTelemetry e o teste de carga
+`bun run test:load`. Nada acima descreve comportamento que não tenha sido executado.
 
 ## Pré-requisitos
 
@@ -88,6 +113,7 @@ bun run test:infra:down
 | `bun run migrate:down` | reverte a última migration |
 | `bun run migrate:fresh` | reverte tudo e reaplica |
 | `bun run test:integration` | sobe a infra de teste, recria o schema e roda a suíte |
+| `bun run test:concurrency` | sobe três processos reais e roda os cenários do README §13 |
 | `bun run test:infra:up` | sobe só a infraestrutura de teste |
 | `bun run test:infra:down` | derruba a infraestrutura de teste |
 
@@ -103,8 +129,8 @@ apontá-las para a infraestrutura desejada.
 | `AWS_ENDPOINT_URL` | endpoint do SQS (LocalStack) |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | credenciais do cliente SQS |
 | `SQS_INPUT_QUEUE`, `SQS_DLQ_QUEUE`, `SQS_EVENTS_QUEUE` | nomes das filas |
-| `APP_ROLES` | papéis ativos nesta instância: `api`, `consumer`, `pending-worker`, `outbox-publisher` |
-| `PORT`, `INSTANCE_ID` | porta HTTP e identificação nos logs |
+| `APP_ROLES` | papéis ativos nesta instância: `api`, `consumer`, `pending-worker`, `outbox-publisher`. Só `api` abre porta HTTP |
+| `PORT`, `INSTANCE_ID` | porta HTTP e identidade da instância nos logs e no lease da outbox |
 
 ## Banco
 
