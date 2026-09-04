@@ -33,16 +33,16 @@ export class WalletLedgerEntry {
 
   static create(props: LedgerEntryState): WalletLedgerEntry {
     if (!props.money.isPositive()) {
-      throw new InvalidLedgerEntryError(`lançamento precisa de valor positivo: ${props.money}`);
+      throw new InvalidLedgerEntryError(`ledger entry requires a positive amount: ${props.money}`);
     }
     if (props.balanceBefore.isNegative() || props.balanceAfter.isNegative()) {
-      throw new InvalidLedgerEntryError('lançamento não pode registrar saldo negativo');
+      throw new InvalidLedgerEntryError('ledger entry cannot record a negative balance');
     }
 
     const entry = WalletLedgerEntry.rehydrate(props);
     if (!entry.isBalanced()) {
       throw new InvalidLedgerEntryError(
-        `aritmética inconsistente: ${props.balanceBefore} ${props.direction} ${props.money} não resulta em ${props.balanceAfter}`,
+        `inconsistent arithmetic: ${props.balanceBefore} ${props.direction} ${props.money} does not result in ${props.balanceAfter}`,
       );
     }
     return entry;

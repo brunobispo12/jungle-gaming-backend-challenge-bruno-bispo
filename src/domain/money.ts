@@ -26,18 +26,18 @@ export class Money {
     const amount = props.amount;
 
     if (typeof amount !== 'string') {
-      throw new InvalidMoneyError(`amount precisa ser string decimal, recebido ${typeof amount}`);
+      throw new InvalidMoneyError(`amount must be a decimal string, received ${typeof amount}`);
     }
     if (!AMOUNT_FORMAT.test(amount)) {
-      throw new InvalidMoneyError(`amount inválido: ${JSON.stringify(amount)}`);
+      throw new InvalidMoneyError(`invalid amount: ${JSON.stringify(amount)}`);
     }
 
     const value = new Exact(amount);
     if (value.isNegative() && !value.isZero()) {
-      throw new InvalidMoneyError(`amount negativo não é aceito em contrato de entrada: ${amount}`);
+      throw new InvalidMoneyError(`negative amount is not accepted on an input contract: ${amount}`);
     }
     if (value.abs().greaterThan(MAX_ABSOLUTE)) {
-      throw new InvalidMoneyError(`amount acima do máximo suportado: ${amount}`);
+      throw new InvalidMoneyError(`amount above the supported maximum: ${amount}`);
     }
 
     return new Money(value, currency);
@@ -47,17 +47,17 @@ export class Money {
     return new Money(new Exact(ZERO), assertCurrency(currency));
   }
 
-  // Dispensa apenas a regra de sinal do contrato de entrada; faixa, escala e
-  // finitude continuam valendo, porque todo Money precisa caber em numeric(20,2).
+  // Waives only the external non-negative rule; range, scale and finiteness
+  // still hold, because every Money must fit numeric(20,2).
   private static of(value: InstanceType<typeof Exact>, currency: string): Money {
     if (!value.isFinite()) {
-      throw new InvalidMoneyError('resultado não finito');
+      throw new InvalidMoneyError('non-finite result');
     }
     if (value.decimalPlaces() > SCALE) {
-      throw new InvalidMoneyError(`resultado com mais de ${SCALE} casas: ${value.toString()}`);
+      throw new InvalidMoneyError(`result with more than ${SCALE} decimal places: ${value.toString()}`);
     }
     if (value.abs().greaterThan(MAX_ABSOLUTE)) {
-      throw new InvalidMoneyError(`resultado fora da faixa suportada: ${value.toFixed(SCALE)}`);
+      throw new InvalidMoneyError(`result outside the supported range: ${value.toFixed(SCALE)}`);
     }
     return new Money(value, currency);
   }
@@ -120,7 +120,7 @@ export class Money {
 
 function assertCurrency(currency: string): string {
   if (typeof currency !== 'string' || !CURRENCY_FORMAT.test(currency)) {
-    throw new InvalidMoneyError(`currency inválida: ${JSON.stringify(currency)}`);
+    throw new InvalidMoneyError(`invalid currency: ${JSON.stringify(currency)}`);
   }
   return currency;
 }

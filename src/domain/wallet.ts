@@ -1,4 +1,9 @@
-import { CurrencyMismatchError, InsufficientFundsError, InvalidLedgerEntryError } from './domain-error';
+import {
+  CurrencyMismatchError,
+  InsufficientFundsError,
+  InvalidLedgerEntryError,
+  InvalidTimestampError,
+} from './domain-error';
 import { Money } from './money';
 import { LedgerDirection, WalletLedgerEntry } from './wallet-ledger-entry';
 
@@ -106,7 +111,7 @@ export class Wallet {
   }
 
   debit(props: MovementProps): WalletLedgerEntry {
-    this.assertMovement(props.money);
+    this.assertMovement(props);
     if (!this.canDebit(props.money)) {
       throw new InsufficientFundsError(this._balance.toString(), props.money.toString());
     }
@@ -115,7 +120,7 @@ export class Wallet {
   }
 
   credit(props: MovementProps): WalletLedgerEntry {
-    this.assertMovement(props.money);
+    this.assertMovement(props);
     return this.apply(LedgerDirection.Credit, this._balance.add(props.money), props);
   }
 
@@ -142,10 +147,13 @@ export class Wallet {
     return entry;
   }
 
-  private assertMovement(money: Money): void {
-    this.assertSameCurrency(money);
-    if (!money.isPositive()) {
-      throw new InvalidLedgerEntryError(`movimento precisa de valor positivo: ${money}`);
+  private assertMovement(props: MovementProps): void {
+    this.assertSameCurrency(props.money);
+    if (!props.money.isPositive()) {
+      throw new InvalidLedgerEntryError(`movement requires a positive amount: ${props.money}`);
+    }
+    if (props.at.getTime() < this.createdAt.getTime()) {
+      throw new InvalidTimestampError(props.at, this.createdAt);
     }
   }
 

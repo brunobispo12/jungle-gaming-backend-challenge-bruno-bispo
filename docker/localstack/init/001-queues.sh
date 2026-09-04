@@ -14,7 +14,7 @@ DLQ_ARN=$(awslocal sqs get-queue-attributes \
   --attribute-names QueueArn \
   --query 'Attributes.QueueArn' --output text)
 
-# JSON em arquivo: o parser abreviado Key=Value do AWS CLI recusa o RedrivePolicy.
+# JSON from a file: the AWS CLI shorthand Key=Value parser rejects RedrivePolicy.
 cat > /tmp/wager-transactions-attrs.json <<'JSON'
 {
   "FifoQueue": "true",

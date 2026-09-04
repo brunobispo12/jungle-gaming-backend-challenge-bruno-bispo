@@ -31,8 +31,8 @@ export function migrationOrmConfig(clientUrl: string): Options {
       glob: '!(*.d).{js,ts}',
       transactional: true,
       allOrNothing: true,
-      // Default do MikroORM é true, o que rodaria a migration com
-      // session_replication_role=replica e desligaria nossos triggers.
+      // MikroORM defaults this to true, which would run the migration under
+      // session_replication_role=replica and disable our triggers.
       disableForeignKeys: false,
       snapshot: false,
       emit: 'ts',

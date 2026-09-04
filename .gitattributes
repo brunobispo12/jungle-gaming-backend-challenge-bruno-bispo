@@ -1,5 +1,5 @@
-# LF obrigatório: os scripts de init são montados em containers Linux, e um
-# clone em Windows com autocrlf entregaria CRLF que o bash recusa.
+# LF is mandatory: the init scripts are mounted into Linux containers, and a
+# Windows clone with autocrlf would hand bash the CRLF it refuses.
 * text=auto eol=lf
 
 *.sh   text eol=lf

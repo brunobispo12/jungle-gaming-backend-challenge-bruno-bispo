@@ -53,8 +53,8 @@ export class Migration20260904000001_initial extends Migration {
       );
     `);
 
-    // Sem FK simples em wallet_id: WALLET_NOT_FOUND precisa ser auditável. A FK
-    // composta é MATCH SIMPLE, então não é verificada com o snapshot nulo.
+    // No plain FK on wallet_id: WALLET_NOT_FOUND has to stay auditable. The
+    // composite FK is MATCH SIMPLE, so it is skipped when the snapshot is null.
     this.addSql(`
       CREATE TABLE wager_transaction (
         id                                uuid                     NOT NULL,
@@ -164,11 +164,11 @@ export class Migration20260904000001_initial extends Migration {
 
     this.addSql(`
       COMMENT ON COLUMN wager_transaction.result_balance_currency IS
-        'Moeda da wallet observada, não a da operação. Em CURRENCY_MISMATCH as duas diferem por definição.';
+        'Currency of the observed wallet, not of the operation. In CURRENCY_MISMATCH the two differ by definition.';
     `);
 
-    // Opção B (README §7 regra 4): unicidade por (referência, kind), então a
-    // mesma referência aceita um REFUND e um ROLLBACK. Não é bug.
+    // Option B (README §7 rule 4): uniqueness is per (reference, kind), so the
+    // same reference accepts one REFUND and one ROLLBACK. Not a bug.
     this.addSql(`
       CREATE UNIQUE INDEX wager_reversal_once_per_kind_uq
         ON wager_transaction (reference_transaction_id, kind)

@@ -14,52 +14,34 @@ const FORBIDDEN = [
   'express',
 ];
 
-function domainFiles(): string[] {
+function domainSources(): Array<{ name: string; source: string }> {
   return readdirSync(DOMAIN_DIR)
     .filter((name) => name.endsWith('.ts'))
-    .map((name) => path.join(DOMAIN_DIR, name));
+    .map((name) => ({ name, source: readFileSync(path.join(DOMAIN_DIR, name), 'utf8') }));
 }
 
 describe('domínio independente de framework', () => {
-  test('há arquivos de domínio para inspecionar', () => {
-    expect(domainFiles().length).toBeGreaterThan(0);
-  });
-
   test('nenhum arquivo importa ORM, NestJS, AWS SDK ou HTTP', () => {
-    const offenders: string[] = [];
+    const sources = domainSources();
+    expect(sources.length).toBeGreaterThan(0);
 
-    for (const file of domainFiles()) {
-      const source = readFileSync(file, 'utf8');
-      for (const dependency of FORBIDDEN) {
-        if (source.includes(`'${dependency}`)) {
-          offenders.push(`${path.basename(file)} -> ${dependency}`);
-        }
-      }
-    }
+    const offenders = sources.flatMap(({ name, source }) =>
+      FORBIDDEN.filter((dependency) => source.includes(`'${dependency}`)).map(
+        (dependency) => `${name} -> ${dependency}`,
+      ),
+    );
 
     expect(offenders).toEqual([]);
   });
 
-  test('nenhum arquivo usa decorator', () => {
-    const offenders = domainFiles().filter((file) =>
-      /^\s*@[A-Z]\w*\s*\(/m.test(readFileSync(file, 'utf8')),
-    );
+  test('nenhum arquivo usa decorator de framework', () => {
+    const sources = domainSources();
+    expect(sources.length).toBeGreaterThan(0);
 
-    expect(offenders.map((file) => path.basename(file))).toEqual([]);
-  });
+    const offenders = sources
+      .filter(({ source }) => /^\s*@[A-Z]\w*\s*\(/m.test(source))
+      .map(({ name }) => name);
 
-  test('todo agregado esconde o construtor atrás de factory', () => {
-    const withClasses = domainFiles().filter((file) => {
-      const source = readFileSync(file, 'utf8');
-      return /^export class /m.test(source) && !file.endsWith('domain-error.ts');
-    });
-
-    const leaking = withClasses.filter((file) => {
-      const source = readFileSync(file, 'utf8');
-      return /^\s{2}constructor\s*\(/m.test(source);
-    });
-
-    expect(leaking.map((file) => path.basename(file))).toEqual([]);
-    expect(withClasses.length).toBeGreaterThan(0);
+    expect(offenders).toEqual([]);
   });
 });

@@ -34,7 +34,7 @@ function read(name: string, fallback?: string): string {
   if (fallback !== undefined) {
     return fallback;
   }
-  throw new Error(`variável de ambiente obrigatória ausente: ${name}`);
+  throw new Error(`missing required environment variable: ${name}`);
 }
 
 function readPort(name: string, fallback: number): number {
@@ -44,7 +44,7 @@ function readPort(name: string, fallback: number): number {
   }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    throw new Error(`${name} inválida: ${raw}`);
+    throw new Error(`invalid ${name}: ${raw}`);
   }
   return parsed;
 }
@@ -58,10 +58,10 @@ function readRoles(): readonly AppRole[] {
 
   const unknown = parsed.filter((role): boolean => !APP_ROLES.includes(role as AppRole));
   if (unknown.length > 0) {
-    throw new Error(`APP_ROLES desconhecido: ${unknown.join(', ')}`);
+    throw new Error(`unknown APP_ROLES: ${unknown.join(', ')}`);
   }
   if (parsed.length === 0) {
-    throw new Error('APP_ROLES não pode ser vazio');
+    throw new Error('APP_ROLES cannot be empty');
   }
   return parsed as AppRole[];
 }

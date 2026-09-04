@@ -16,7 +16,7 @@ export class CurrencyMismatchError extends DomainError {
     readonly expected: string,
     readonly received: string,
   ) {
-    super(`moeda incompatível: esperado ${expected}, recebido ${received}`);
+    super(`currency mismatch: expected ${expected}, received ${received}`);
   }
 }
 
@@ -25,7 +25,7 @@ export class InsufficientFundsError extends DomainError {
     readonly balance: string,
     readonly requested: string,
   ) {
-    super(`saldo insuficiente: disponível ${balance}, solicitado ${requested}`);
+    super(`insufficient funds: available ${balance}, requested ${requested}`);
   }
 }
 
@@ -34,7 +34,16 @@ export class InvalidTransactionStateError extends DomainError {
     readonly from: string,
     readonly to: string,
   ) {
-    super(`transição inválida: ${from} para ${to}`);
+    super(`invalid transition: ${from} to ${to}`);
+  }
+}
+
+export class InvalidTimestampError extends DomainError {
+  constructor(
+    readonly at: Date,
+    readonly notBefore: Date,
+  ) {
+    super(`timestamp ${at.toISOString()} is earlier than ${notBefore.toISOString()}`);
   }
 }
 

@@ -15,4 +15,4 @@ app.enableShutdownHooks();
 
 await app.listen(env.port, '0.0.0.0');
 
-logger.write('info', 'aplicação iniciada', { port: env.port, nodeEnv: env.nodeEnv });
+logger.write('info', 'application started', { port: env.port, nodeEnv: env.nodeEnv });

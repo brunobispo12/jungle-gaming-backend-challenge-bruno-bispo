@@ -121,12 +121,12 @@ export class WagerTransaction {
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     if (props.kind === WagerTransactionKind.Opening) {
       throw new InvalidWagerTransactionError(
-        'OPENING é interno e não pode ser submetido por API nem por fila',
+        'OPENING is internal and cannot be submitted through the API or the queue',
       );
     }
     if (props.providerId === INTERNAL_PROVIDER_ID) {
       throw new InvalidWagerTransactionError(
-        `${INTERNAL_PROVIDER_ID} é provider reservado para transações internas`,
+        `${INTERNAL_PROVIDER_ID} is a provider reserved for internal transactions`,
       );
     }
     return WagerTransaction.reserve(props);
@@ -151,10 +151,10 @@ export class WagerTransaction {
   private static reserve(props: CreateWagerTransactionProps): WagerTransaction {
     const requiresReference = REVERSAL_KINDS.includes(props.kind);
     if (requiresReference && !props.referenceExternalTransactionId) {
-      throw new InvalidWagerTransactionError(`${props.kind} exige referenceExternalTransactionId`);
+      throw new InvalidWagerTransactionError(`${props.kind} requires referenceExternalTransactionId`);
     }
     if (!props.money.isPositive()) {
-      throw new InvalidWagerTransactionError(`${props.kind} exige valor maior que zero`);
+      throw new InvalidWagerTransactionError(`${props.kind} requires an amount greater than zero`);
     }
 
     return new WagerTransaction(
@@ -263,7 +263,7 @@ export class WagerTransaction {
     this.assertTransition(WagerTransactionStatus.PendingReference);
     if (!this.requiresReference()) {
       throw new InvalidWagerTransactionError(
-        `${this.kind} não aguarda referência: PENDING_REFERENCE é exclusivo de REFUND e ROLLBACK`,
+        `${this.kind} does not await a reference: PENDING_REFERENCE is exclusive to REFUND and ROLLBACK`,
       );
     }
 
@@ -276,18 +276,18 @@ export class WagerTransaction {
   reject(props: { code: FailureCode; resultBalance?: Money | undefined; at: Date }): void {
     this.assertTransition(WagerTransactionStatus.Rejected);
     if (props.code === FailureCode.InfrastructureFailure) {
-      throw new InvalidWagerTransactionError('INFRASTRUCTURE_FAILURE pertence a FAILED');
+      throw new InvalidWagerTransactionError('INFRASTRUCTURE_FAILURE belongs to FAILED');
     }
 
     const observedWallet = props.code !== FailureCode.WalletNotFound;
     if (observedWallet && !props.resultBalance) {
       throw new InvalidWagerTransactionError(
-        `rejeição ${props.code} observou a wallet e precisa do saldo histórico`,
+        `rejection ${props.code} observed the wallet and requires the historical balance`,
       );
     }
     if (!observedWallet && props.resultBalance) {
       throw new InvalidWagerTransactionError(
-        'WALLET_NOT_FOUND não pode carregar saldo histórico: nenhuma wallet foi observada',
+        'WALLET_NOT_FOUND cannot carry a historical balance: no wallet was observed',
       );
     }
 
@@ -344,7 +344,7 @@ export class WagerTransaction {
   ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
     switch (this.kind) {
       case WagerTransactionKind.Loss:
-        throw new InvalidWagerTransactionError('LOSS não gera lançamento');
+        throw new InvalidWagerTransactionError('LOSS produces no ledger entry');
       case WagerTransactionKind.Bet:
         return LedgerDirection.Debit;
       case WagerTransactionKind.Opening:
@@ -353,7 +353,7 @@ export class WagerTransaction {
         return LedgerDirection.Credit;
       case WagerTransactionKind.Rollback: {
         if (!reference) {
-          throw new InvalidWagerTransactionError('ROLLBACK precisa da referência para inverter');
+          throw new InvalidWagerTransactionError('ROLLBACK needs its reference to invert');
         }
         return reference.ledgerDirectionFor() === LedgerDirection.Debit
           ? LedgerDirection.Credit

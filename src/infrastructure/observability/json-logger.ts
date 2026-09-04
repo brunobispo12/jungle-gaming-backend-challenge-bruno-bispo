@@ -6,7 +6,7 @@ export interface LogFields {
   readonly [key: string]: unknown;
 }
 
-// Nunca logar amount, balance, payload financeiro completo ou credencial (README §12).
+// Never log amount, balance, full financial payload or credentials (README §12).
 export class JsonLogger implements LoggerService {
   constructor(private readonly base: LogFields) {}
 

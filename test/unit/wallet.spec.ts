@@ -4,6 +4,7 @@ import {
   CurrencyMismatchError,
   InsufficientFundsError,
   InvalidLedgerEntryError,
+  InvalidTimestampError,
 } from '@/domain/domain-error';
 import { Money } from '@/domain/money';
 import { LedgerDirection } from '@/domain/wallet-ledger-entry';
@@ -99,6 +100,17 @@ describe('Wallet — invariantes de saldo', () => {
     expect(() => wallet.credit(movement(dollar))).toThrow(CurrencyMismatchError);
     expect(() => wallet.debit(movement(dollar))).toThrow(CurrencyMismatchError);
     expect(wallet.balance.toString()).toBe('1000.00');
+    expect(wallet.version).toBe(1);
+  });
+
+  test('movimento anterior à criação da wallet é rejeitado', () => {
+    const wallet = openWallet('1000.00');
+    const before = new Date(AT.getTime() - 1);
+
+    expect(() =>
+      wallet.debit({ entryId: 'e', transactionId: 't', money: brl('1.00'), at: before }),
+    ).toThrow(InvalidTimestampError);
+    expect(wallet.updatedAt).toEqual(AT);
     expect(wallet.version).toBe(1);
   });
 
