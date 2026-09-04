@@ -237,6 +237,26 @@ describe('WagerTransaction — state machine', () => {
     );
   });
 
+  test('rejeição que observou a wallet exige o saldo histórico', () => {
+    expect(() => bet().reject({ code: FailureCode.InsufficientFunds, at: AT })).toThrow(
+      InvalidWagerTransactionError,
+    );
+  });
+
+  test('WALLET_NOT_FOUND é a única rejeição sem saldo histórico, e não aceita um', () => {
+    const notFound = bet();
+    notFound.reject({ code: FailureCode.WalletNotFound, at: AT });
+    expect(notFound.resultBalance).toBeUndefined();
+
+    expect(() =>
+      bet().reject({
+        code: FailureCode.WalletNotFound,
+        resultBalance: brl('10.00'),
+        at: AT,
+      }),
+    ).toThrow(InvalidWagerTransactionError);
+  });
+
   test('INFRASTRUCTURE_FAILURE não é rejeição de negócio', () => {
     expect(() =>
       bet().reject({ code: FailureCode.InfrastructureFailure, resultBalance: brl('1.00'), at: AT }),

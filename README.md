@@ -15,7 +15,7 @@ O que existe e roda:
 - health checks de liveness e readiness;
 - o domínio financeiro — `Money` decimal exato, `Wallet`, ledger imutável, ciclo de vida
   da `WagerTransaction` e validação de reversão;
-- 102 testes de unidade do domínio e 37 de integração contra PostgreSQL real.
+- 108 testes de unidade do domínio e 37 de integração contra PostgreSQL real.
 
 **Ainda não implementados**: os casos de uso, a API de wagering, o consumidor SQS, a
 outbox, o worker de referências pendentes e a reconciliação. Nada abaixo descreve

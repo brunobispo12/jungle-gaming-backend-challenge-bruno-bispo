@@ -279,6 +279,18 @@ export class WagerTransaction {
       throw new InvalidWagerTransactionError('INFRASTRUCTURE_FAILURE pertence a FAILED');
     }
 
+    const observedWallet = props.code !== FailureCode.WalletNotFound;
+    if (observedWallet && !props.resultBalance) {
+      throw new InvalidWagerTransactionError(
+        `rejeição ${props.code} observou a wallet e precisa do saldo histórico`,
+      );
+    }
+    if (!observedWallet && props.resultBalance) {
+      throw new InvalidWagerTransactionError(
+        'WALLET_NOT_FOUND não pode carregar saldo histórico: nenhuma wallet foi observada',
+      );
+    }
+
     this._status = WagerTransactionStatus.Rejected;
     this._failureCode = props.code;
     this._resultBalance = props.resultBalance;
