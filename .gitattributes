@@ -1,0 +1,12 @@
+# LF obrigatório: os scripts de init são montados em containers Linux, e um
+# clone em Windows com autocrlf entregaria CRLF que o bash recusa.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.ts   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+
+bun.lock -diff linguist-generated
