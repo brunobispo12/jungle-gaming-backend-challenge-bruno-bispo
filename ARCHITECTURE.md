@@ -1,12 +1,12 @@
 # Architecture
 
-Este documento descreve o desenho pretendido para o serviço antes da implementação. As escolhas abaixo priorizam correção financeira sob duplicação, entrega fora de ordem, concorrência entre processos e falhas entre commit, publicação e ACK.
+Este documento descreve o serviço entregue: as decisões tomadas, os trade-offs aceitos e as limitações conhecidas. As escolhas abaixo priorizam correção financeira sob duplicação, entrega fora de ordem, concorrência entre processos e falhas entre commit, publicação e ACK.
 
-A stack será Bun 1.x como runtime, package manager e test runner; TypeScript strict; NestJS; PostgreSQL; MikroORM; AWS SQS com LocalStack; e Docker Compose.
+A stack é Bun 1.x como runtime, package manager e test runner; TypeScript strict; NestJS; PostgreSQL; MikroORM; AWS SQS com LocalStack; e Docker Compose.
 
 ## 1. Escopo e prioridades
 
-O serviço receberá operações de apostas por HTTP e SQS, manterá o saldo materializado de cada Wallet, registrará toda movimentação em um ledger imutável e publicará eventos de integração por Transactional Outbox.
+O serviço recebe operações de apostas por HTTP e SQS, mantém o saldo materializado de cada Wallet, registra toda movimentação em um ledger imutável e publica eventos de integração por Transactional Outbox.
 
 Correção significa preservar simultaneamente estes invariantes:
 
@@ -21,13 +21,13 @@ Correção significa preservar simultaneamente estes invariantes:
 
 A ordem de prioridade é: exatidão de Money, atomicidade, idempotência, concorrência por Wallet, recuperação de falhas e, depois, throughput. Uma Wallet muito concorrida poderá esperar por lock; Wallets diferentes continuam independentes.
 
-Ficam fora desta entrega autenticação funcional, double-entry bookkeeping, correção automática de divergências, exactly-once e ordenação global de eventos. Também não entram CQRS, CommandBus, repositórios genéricos, ClickHouse nem dashboards elaborados. OpenTelemetry entra somente para tracing e correlação de contexto; logs continuam em stdout.
+Ficam fora desta entrega autenticação funcional, double-entry bookkeeping, correção automática de divergências, exactly-once e ordenação global de eventos. Também não entram CQRS, CommandBus, repositórios genéricos, ClickHouse nem dashboards elaborados. OpenTelemetry e o teste de carga são opcionais pelo README §12 e §14, e nenhum dos dois foi implementado; observabilidade é logs JSON em stdout e métricas Prometheus.
 
-ProviderIdentityPort será o único ponto de extensão de autenticação, inicialmente com um adapter no-op. Uma evolução usaria OAuth2 client credentials e validaria o provider_id do token contra o corpo. Health checks continuam públicos; a entrada SQS é interna, mas seus dados ainda passam pelas mesmas validações de domínio.
+`ProviderIdentityPort` é o único ponto de extensão de autenticação, hoje implementado por `TrustedProviderIdentityAdapter`, que aceita a identidade declarada porque nenhum Identity Provider está ligado. O port fica no caminho real de `POST /wagering/transactions`: o controller resolve a identidade antes de submeter, e é o `providerId` resolvido que entra no comando e no `payloadHash`. Uma evolução troca só o adapter, por um que faça introspecção de OAuth2 client credentials e valide o `provider_id` do token contra o corpo. Health checks continuam públicos; a entrada SQS não passa pelo port — a fila é canal interno (README §2), e seus dados continuam sujeitos às mesmas validações de domínio.
 
 ## 2. Topologia
 
-O mesmo caso de uso financeiro será chamado pelas duas entradas:
+O mesmo caso de uso financeiro é chamado pelas duas entradas:
 
     HTTP Controller ───────────────────────┐
                                            │
@@ -47,21 +47,23 @@ O mesmo caso de uso financeiro será chamado pelas duas entradas:
                                                          ▼
                                                   wager-events.fifo
 
-Um único binário suportará os papéis api, consumer, pending-worker e outbox-publisher por configuração. Docker Compose poderá iniciar três ou mais processos com todos os papéis. O desenho é multi-instance; nenhum papel precisa ser singleton: Inbox, unique indexes, row locks, SKIP LOCKED e leases coordenam instâncias concorrentes.
+Um único binário suporta os papéis api, consumer, pending-worker e outbox-publisher por `APP_ROLES`. Docker Compose inicia três processos com todos os papéis. O desenho é multi-instance; nenhum papel precisa ser singleton: Inbox, unique indexes, row locks, SKIP LOCKED e leases coordenam instâncias concorrentes.
+
+Todo processo abre a porta HTTP, qualquer que seja o papel, porque `/health/live`, `/health/ready` e `/metrics` precisam ser alcançáveis também num consumer ou num publisher — métricas que ninguém consegue raspar não são observabilidade. O papel `api` não decide mais se há porta, e sim se a API de negócio é servida: sem ele, `ApiRoleGuard` responde 404 em `/wallets` e `/wagering/transactions`, e a superfície operacional continua respondendo. Cada processo tem a sua `PORT`.
 
 A indisponibilidade de um papel afeta disponibilidade ou latência, não muda a regra de correção. O estado necessário para recuperar trabalho fica no PostgreSQL ou no SQS, nunca apenas em memória do processo.
 
-O código será separado em domain, application, infrastructure, interface e bootstrap. As portas serão WalletRepository, WagerTransactionRepository, LedgerRepository, InboxRepository, OutboxRepository, UnitOfWork, EventPublisher, IdGenerator, Clock, MetricsPort e ProviderIdentityPort; não haverá abstrações genéricas para operações que o domínio já nomeia melhor.
+O código é separado em domain, application, infrastructure, interface e bootstrap. As portas são WalletRepository, WagerTransactionRepository, LedgerRepository, InboxRepository, OutboxRepository, OutboxClaimRepository, UnitOfWork, EventPublisher, IdGenerator, Clock, MetricsPort, MetricsExporter e ProviderIdentityPort; não há abstrações genéricas para operações que o domínio já nomeia melhor.
 
 ## 3. Money e domínio
 
-As classes de domínio terão construtor privado ou protegido e estado encapsulado. Factories como create/from validam uma criação ou transição nova; rehydrate apenas recompõe o estado já validado e persistido, sem repetir regras de transição. Não haverá setters públicos para contornar Wallet, WagerTransaction ou WalletLedgerEntry.
+As classes de domínio têm construtor privado ou protegido e estado encapsulado. Factories como create/from validam uma criação ou transição nova; rehydrate apenas recompõe o estado já validado e persistido, sem repetir regras de transição. Não há setters públicos para contornar Wallet, WagerTransaction ou WalletLedgerEntry.
 
 ### 3.1 Money sem ponto flutuante
 
-Money será imutável e guardará um Decimal de decimal.js com precisão 34. O caminho completo será `decimal string → Money(Decimal) → persistence row string → MikroORM DecimalType('string') → PostgreSQL numeric(20,2)`; a leitura faz o caminho inverso. Nenhuma etapa usa Number, parseFloat, coerção unária, float ou double.
+Money é imutável e guarda um Decimal de decimal.js com precisão 34. O caminho completo é `decimal string → Money(Decimal) → persistence row string → EntitySchema com type string → PostgreSQL numeric(20,2)`; a leitura faz o caminho inverso. Nenhuma etapa monetária usa Number, parseFloat, coerção unária, float ou double.
 
-Nos contratos de entrada, 25, 25.0 e 25.00 serão normalizados para 25.00 antes do payloadHash. Notação científica, NaN, Infinity, string vazia, mais de duas casas, valores negativos e valores acima de 999999999999999999.99 serão rejeitados. Money pode representar zero e valores negativos produzidos internamente por `negate`, como a diferença de reconciliação; initialBalance admite zero. O contrato de Wager exige amount maior que zero e rejeita `0.00` com AMOUNT_NOT_POSITIVE antes da reserva. Não existe arredondamento silencioso.
+Nos contratos de entrada, 25, 25.0 e 25.00 são normalizados para 25.00 antes do payloadHash. Notação científica, NaN, Infinity, string vazia, mais de duas casas, valores negativos e valores acima de 999999999999999999.99 são rejeitados. Money pode representar zero e valores negativos produzidos internamente por `negate`, como a diferença de reconciliação; initialBalance admite zero. O contrato de Wager exige amount maior que zero e rejeita `0.00` com AMOUNT_NOT_POSITIVE antes da reserva. Não existe arredondamento silencioso.
 
 Money compara moeda em toda operação. O modelo permanece multi-moeda, embora a entrega possa operar apenas com BRL. Direção financeira é representada por LedgerDirection, não pelo sinal do valor.
 
@@ -94,9 +96,9 @@ Transições permitidas:
                                   ├→ REJECTED
                                   └→ FAILED
 
-PROCESSED, REJECTED e FAILED são terminais. processedAt existe exatamente nesses estados. Um trigger deverá rejeitar UPDATE ou DELETE de uma linha que já estava terminal.
+PROCESSED, REJECTED e FAILED são terminais. processedAt existe exatamente nesses estados. Um trigger rejeita UPDATE ou DELETE de uma linha que já estava terminal.
 
-FAILED terá uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED. Não haverá evento de integração para FAILED.
+FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED. Não há evento de integração para FAILED.
 
 ### 3.4 Efeito financeiro por kind
 
@@ -111,28 +113,28 @@ FAILED terá uso restrito: somente uma falha determinística e permanente ao pro
 
 OPENING usa providerId internal, externalTransactionId opening:<walletId>, idempotencyKey internal:opening:<walletId>, roundId/gameId internal e hash canônico. O provider internal é inválido nas entradas externas, mas continua consultável por `GET /providers/internal/wagering/transactions/opening:<walletId>`: esconder o OPENING deixaria o histórico da Wallet incompleto. Saldo inicial zero cria somente a Wallet; saldo positivo cria OPENING, ledger e eventos na mesma transação. A Wallet continua observável com version 1.
 
-WIN não passa a exigir referência. Se uma referência opcional for resolvida, deverá ser validada. Se o identificador opcional ainda não existir, o WIN será processado sem vínculo interno, com log e métrica dessa escolha.
+WIN não exige referência. Se uma referência opcional é resolvida, ela é validada. Se o identificador opcional ainda não existe, o WIN é processado sem vínculo interno. Não há log ou métrica específicos para essa escolha.
 
 ### 3.5 Reversões — opção B
 
-REFUND e ROLLBACK exigem referenceExternalTransactionId. A referência será resolvida por providerId e externalTransactionId e deverá coincidir em provider, player, Wallet, moeda e rodada. O valor precisa ser exatamente igual em magnitude; reversão parcial está fora de escopo.
+REFUND e ROLLBACK exigem referenceExternalTransactionId. A referência é resolvida por providerId e externalTransactionId e deve coincidir em provider, player, Wallet, moeda e rodada. O valor precisa ser exatamente igual em magnitude; reversão parcial está fora de escopo.
 
-REFUND referencia apenas BET PROCESSED. ROLLBACK referencia BET, WIN ou REFUND PROCESSED. ROLLBACK de BET produz crédito; ROLLBACK de WIN ou REFUND produz débito e será REJECTED com REVERSAL_WOULD_OVERDRAW se deixar saldo negativo.
+REFUND referencia apenas BET PROCESSED. ROLLBACK referencia BET, WIN ou REFUND PROCESSED. ROLLBACK de BET produz crédito; ROLLBACK de WIN ou REFUND produz débito e é REJECTED com REVERSAL_WOULD_OVERDRAW se deixar saldo negativo.
 
 Adoto a opção B como interpretação candidata da frase “uma referência não pode ser revertida duas vezes pelo mesmo tipo de operação”:
 
 - uma referência pode ter no máximo um REFUND PROCESSED;
 - a mesma referência pode ter no máximo um ROLLBACK PROCESSED;
-- o banco impedirá repetição do mesmo kind;
+- o banco impede repetição do mesmo kind;
 - REFUND e ROLLBACK podem referenciar diretamente a mesma transação.
 
-A constraint correspondente será:
+A constraint correspondente é:
 
     UNIQUE (reference_transaction_id, kind)
     WHERE status = 'PROCESSED'
       AND kind IN ('REFUND', 'ROLLBACK')
 
-Portanto, BET → REFUND(BET) → ROLLBACK(BET) é aceito e pode gerar dois créditos. Essa consequência será mantida explícita porque é o custo da leitura textualmente mais próxima do enunciado. Não há cascata: reverter REFUND não reabre BET, e reverter BET não altera WIN.
+Portanto, BET → REFUND(BET) → ROLLBACK(BET) é aceito e pode gerar dois créditos. Essa consequência é mantida explícita porque é o custo da leitura textualmente mais próxima do enunciado. Não há cascata: reverter REFUND não reabre BET, e reverter BET não altera WIN.
 
 ### 3.6 FailureCode
 
@@ -151,11 +153,11 @@ Os dois códigos de saldo são separados porque uma BET sem fundos e uma revers�
 
 ## 4. PostgreSQL: schema e invariantes
 
-Escolhi MikroORM porque seu Unit of Work, Identity Map e suporte a transações/locks deixam explícita a fronteira que importa neste desafio. EntitySchema mapeará persistence rows POJO; mappers dedicados farão domínio ↔ persistência. Assim Money, Wallet e WagerTransaction não recebem decorators do ORM ou do NestJS. Cada requisição, mensagem ou iteração de worker usa um EntityManager forkado.
+Escolhi MikroORM porque seu Unit of Work, Identity Map e suporte a transações/locks deixam explícita a fronteira que importa neste desafio. EntitySchema mapeia persistence rows POJO; mappers dedicados fazem domínio ↔ persistência. Assim Money, Wallet e WagerTransaction não recebem decorators do ORM ou do NestJS. Cada requisição, mensagem ou iteração de worker usa um EntityManager forkado.
 
 Reservas com ON CONFLICT, row locks e claims podem usar QueryBuilder ou SQL encapsulado nos repositórios quando a operação precisa acontecer imediatamente, sem depender do flush tardio do Unit of Work. O custo é algum código de mapeamento, aceito para não acoplar as invariantes do domínio ao formato das tabelas.
 
-Migrations serão versionadas, terão up/down e rodarão com uma credencial separada. A role da aplicação terá apenas os privilégios necessários ao runtime. Todas as constraints terão nomes estáveis, usados para classificar um SQLSTATE 23505 residual.
+Migrations são versionadas, têm up/down e rodam com uma credencial separada. A role da aplicação possui apenas os privilégios necessários ao runtime. As constraints têm nomes estáveis para diagnóstico e testes de banco.
 
 | Invariante | Mecanismo no PostgreSQL | Por que não basta código |
 |---|---|---|
@@ -174,21 +176,21 @@ Migrations serão versionadas, terão up/down e rodarão com uma credencial sepa
 
 Os CHECKs de WagerTransaction tornam PENDING uma reserva sem resultado; exigem snapshot e referência externa em PENDING_REFERENCE; e exigem processedAt nos estados terminais. PROCESSED não tem failureCode; REJECTED e FAILED têm, e FAILED aceita apenas INFRASTRUCTURE_FAILURE. resultBalance existe para todo resultado que encontrou a Wallet, com WALLET_NOT_FOUND como única exceção. Sua moeda é a da Wallet observada, não necessariamente a da operação: em CURRENCY_MISMATCH elas diferem; nos outros resultados com snapshot, um CHECK exige igualdade.
 
-WagerTransaction não terá FK simples obrigatória de wallet_id para permitir que WALLET_NOT_FOUND permaneça auditável. A FK composta com result_balance_currency é ignorada pelo MATCH SIMPLE quando o snapshot é nulo e valida a Wallet quando ele existe. Toda WalletLedgerEntry, que representa efeito financeiro real, terá FK para Wallet e WagerTransaction.
+WagerTransaction não tem FK simples obrigatória de wallet_id para permitir que WALLET_NOT_FOUND permaneça auditável. A FK composta com result_balance_currency é ignorada pelo MATCH SIMPLE quando o snapshot é nulo e valida a Wallet quando ele existe. Toda WalletLedgerEntry, que representa efeito financeiro real, tem FK para Wallet e WagerTransaction.
 
-A igualdade entre Wallet.balance e a soma do ledger atravessa linhas e tabelas, portanto não cabe em um CHECK local. Ela será protegida pela transação financeira única, pelo lançamento criado pela própria Wallet e pela reconciliação.
+A igualdade entre Wallet.balance e a soma do ledger atravessa linhas e tabelas, portanto não cabe em um CHECK local. Ela é protegida pela transação financeira única, pelo lançamento criado pela própria Wallet e verificada pela reconciliação.
 
 A reversão de uma migration é operação sobre schema, não um caminho runtime para apagar ledger. A role da aplicação não recebe DELETE nas tabelas financeiras/auditáveis e só atualiza as colunas mutáveis de cada lifecycle. Em wallet_ledger_entry, não recebe UPDATE, DELETE nem TRUNCATE; manutenção destrutiva exige a credencial separada de migration/operação.
 
-IDs de Wallet, WagerTransaction, WalletLedgerEntry, OutboxMessage e eventId serão UUID v7 gerados por IdGenerator. O desenho usa sua unicidade, não supõe ordem temporal pelo UUID.
+IDs de Wallet, WagerTransaction, WalletLedgerEntry, OutboxMessage e eventId são UUID v7 gerados por IdGenerator. O desenho usa sua unicidade, não supõe ordem temporal pelo UUID.
 
 ## 5. Fronteira transacional e concorrência
 
-Operações financeiras normais usarão READ COMMITTED. Esse nível permite que uma nova consulta após o INSERT concorrente veja a transação vencedora, enquanto o row lock da Wallet serializa o saldo. Em READ COMMITTED o próprio `SELECT … FOR UPDATE` reavalia a linha quando o bloqueio termina e devolve a versão que a vencedora commitou: por isso, no cenário obrigatório, a segunda BET lê `20.00` e não os `100.00` visíveis no início da sua transação. É esse comportamento — não a coluna `version` — que elimina o lost update.
+Operações financeiras normais usam READ COMMITTED. Esse nível permite que uma nova consulta após o INSERT concorrente veja a transação vencedora, enquanto o row lock da Wallet serializa o saldo. Em READ COMMITTED o próprio `SELECT … FOR UPDATE` reavalia a linha quando o bloqueio termina e devolve a versão que a vencedora commitou: por isso, no cenário obrigatório, a segunda BET lê `20.00` e não os `100.00` visíveis no início da sua transação. É esse comportamento — não a coluna `version` — que elimina o lost update.
 
-Escolhi lock pessimista porque o cenário central é contenção sobre um saldo mutável. Dentro da transação, a implementação executará um único SELECT … FOR UPDATE bloqueante na Wallet. Não haverá probe não bloqueante seguido de retry, nem comparação otimista por version.
+Escolhi lock pessimista porque o cenário central é contenção sobre um saldo mutável. Dentro da transação, a implementação executa um único SELECT … FOR UPDATE bloqueante na Wallet. Não há probe não bloqueante seguido de retry, nem comparação otimista por version.
 
-Cada entrada limitará o lock abaixo do próprio prazo. No SQS, lock_timeout não excederá 20 s e o orçamento total da transação será de até 45 s, deixando margem no VisibilityTimeout de 60 s para finalizar e enviar ACK. No HTTP, lock e transação terminarão antes do timeout da requisição. Timeout, deadlock e indisponibilidade causam rollback e são classificados como transitórios.
+Cada tentativa de lock da Wallet usa `SET LOCAL lock_timeout`, com default de 20 s. Lock timeout e deadlock causam rollback; no HTTP são expostos como 503 com `Retry-After`, e no SQS são tratados como falha transitória sem ACK. Não existe deadline global de transação ou de request nesta entrega.
 
 Não há lock global. Operações em Wallets diferentes adquirem rows diferentes e podem avançar em paralelo. O custo é serialização e espera em hot Wallets, coerente com a unidade de concorrência exigida pelo desafio.
 
@@ -208,7 +210,7 @@ Nenhuma chamada SQS ocorre com a transação financeira aberta.
 
 ### 5.2 Ordem de locks
 
-A ordem será:
+A ordem é:
 
 1. reserva da Inbox, quando a origem é SQS;
 2. reserva da própria WagerTransaction em PENDING;
@@ -236,31 +238,30 @@ externalTransactionId possui uma unicidade independente:
 
 Uma chave nova para externalTransactionId já existente retorna EXTERNAL_TRANSACTION_ID_REUSED; não é replay.
 
-O business payloadHash será SHA-256 hexadecimal de JSON canônico, com chaves ordenadas por code unit, campos ausentes omitidos e Money já normalizado. Participam providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money e referenceExternalTransactionId quando presente.
+O business payloadHash é SHA-256 hexadecimal de JSON canônico, com chaves ordenadas por code unit, campos ausentes omitidos e Money já normalizado. Participam providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money e referenceExternalTransactionId quando presente.
 
 Idempotency-Key e metadados de transporte não participam. Assim HTTP e SQS produzem o mesmo hash para o mesmo fato.
 
 ### 6.2 Algoritmo da primeira submissão
 
-1. Validar o contrato, normalizar Money e calcular payloadHash.
-2. No HTTP, consultar providerId+idempotencyKey antes da transação e devolver replay/conflito quando já existir.
-3. Iniciar READ COMMITTED; no SQS, reservar a Inbox antes de qualquer consulta de negócio.
-4. Inserir WagerTransaction em PENDING com INSERT … ON CONFLICT DO NOTHING RETURNING.
-5. Se não inseriu, executar uma nova consulta em READ COMMITTED:
+1. Validar o contrato e normalizar Money na fronteira; calcular payloadHash no caso de uso.
+2. Iniciar READ COMMITTED; no SQS, reservar a Inbox antes de qualquer consulta de negócio.
+3. Inserir WagerTransaction em PENDING com INSERT … ON CONFLICT DO NOTHING RETURNING.
+4. Se não inseriu, executar uma nova consulta em READ COMMITTED:
    - procurar providerId+idempotencyKey;
    - hash igual: replay;
    - hash divergente: IDEMPOTENCY_KEY_CONFLICT;
    - sem key, procurar providerId+externalTransactionId;
    - external existente: EXTERNAL_TRANSACTION_ID_REUSED;
-   - nada encontrado: erro transitório anômalo e alerta.
-6. Somente quem inseriu trava a Wallet.
-7. Resolver referência, decidir o resultado e persistir saldo, ledger, resultBalance e Outbox quando aplicáveis.
-8. Sair de PENDING para PROCESSED, REJECTED ou PENDING_REFERENCE; no SQS, marcar a Inbox processada.
-9. Commit; só depois responder ou enviar ACK.
+   - nada encontrado: SERVICE_UNAVAILABLE transitório.
+5. Somente quem inseriu trava a Wallet.
+6. Resolver referência, decidir o resultado e persistir saldo, ledger, resultBalance e Outbox quando aplicáveis.
+7. Sair de PENDING para PROCESSED, REJECTED ou PENDING_REFERENCE; no SQS, marcar a Inbox processada.
+8. Commit; só depois responder ou enviar ACK.
 
 O INSERT concorrente espera a decisão da unique index. Se a vencedora commitar, a consulta seguinte a enxerga; se abortar, uma concorrente assume a inserção. Em 50 requisições idênticas, uma única transação toca a Wallet.
 
-Corridas esperadas não usarão SQLSTATE 23505 como controle normal. Um 23505 residual aborta e é classificado por constraint_name depois do rollback: idempotência/identidade viram leitura limpa e replay/conflito; Wallet vira WALLET_ALREADY_EXISTS; ledger, eventId, reversão inesperada ou nome desconhecido geram alerta e erro seguro, sem repetir efeito financeiro.
+Corridas esperadas não usam SQLSTATE 23505 como controle normal: as reservas de Wager e Wallet usam `ON CONFLICT DO NOTHING`. Uma violação residual de constraint aborta a transação e segue como erro interno seguro; não existe classificador genérico por `constraint_name` nem subsistema de alerting nesta entrega.
 
 ### 6.3 Resultado histórico
 
@@ -292,20 +293,20 @@ Inbox deduplica entregas de transporte por:
 
     PRIMARY KEY (consumer_name, message_id)
 
-consumerName será wager-transactions-consumer. messageId é o campo autoral do envelope; broker MessageId será guardado apenas para diagnóstico. O contrato assume que messageId é globalmente único dentro desse consumidor lógico.
+consumerName é wager-transactions-consumer. messageId é o campo autoral do envelope; o broker MessageId é guardado separadamente apenas para diagnóstico. O contrato assume que messageId é globalmente único dentro desse consumidor lógico.
 
 O inboxPayloadHash é diferente do business payloadHash. Ele cobre type, occurredAt e data completa já canonizada, incluindo idempotencyKey, e exclui metadata do broker.
 
 Ao consumir:
 
 1. validar JSON, messageId, type, occurredAt e data;
-2. calcular rawBodyHash, inboxPayloadHash e business payloadHash;
+2. calcular inboxPayloadHash e business payloadHash; rawBodyHash é calculado somente ao rotear para a DLQ;
 3. iniciar transação;
 4. reservar Inbox com INSERT … ON CONFLICT DO NOTHING RETURNING;
 5. se perdeu:
    - mesmo hash e processedAt preenchido: redelivery, sem efeito;
    - hash divergente: erro permanente, sem chegar ao caso de uso;
-   - processedAt ausente: estado anômalo, rollback e alerta;
+   - processedAt ausente: estado anômalo, rollback e retry transitório;
 6. se ganhou, executar a idempotência de negócio;
 7. persistir resultado, Inbox e Outbox atomicamente;
 8. commit;
@@ -320,9 +321,9 @@ Uma entrega nova que encontra replay de negócio ainda precisa commitar sua Inbo
 | Business rejection | saldo insuficiente, moeda/referência inválida | REJECTED + Inbox + Outbox | ACK após commit |
 | Transient | PostgreSQL/SQS indisponível, timeout, deadlock | rollback | sem ACK, visibility/backoff |
 | Permanent contract | envelope/kind inválido, hash divergente, conflito de identidade | nenhuma Wager nova | DLQ e depois delete |
-| Unknown | exceção não classificada | rollback | transient + alerta |
+| Unknown | exceção não classificada | rollback | transient + log seguro |
 
-Para erro permanente descoberto depois de reservar Inbox, a transação será revertida antes do envio à DLQ. O SendMessage para wager-transactions-dlq.fifo precede o DeleteMessage da origem.
+Para erro permanente descoberto depois de reservar Inbox, a transação é revertida antes do envio à DLQ. O SendMessage para wager-transactions-dlq.fifo precede o DeleteMessage da origem.
 
 Como a DLQ também é FIFO:
 
@@ -346,7 +347,7 @@ Backoff transitório:
 
     min(60 s, 5 s × 2^(ApproximateReceiveCount − 1))
 
-O consumer aplicará ChangeMessageVisibility e não apagará a mensagem. Uma mensagem em retry bloqueia temporariamente outras do mesmo walletId; grupos de outras Wallets continuam avançando. Uma indisponibilidade longa pode levar uma mensagem válida à DLQ após cinco recebimentos, exigindo alarme e redrive operacional.
+O consumer aplica ChangeMessageVisibility e não apaga a mensagem. Uma mensagem em retry bloqueia temporariamente outras do mesmo walletId; grupos de outras Wallets continuam avançando. Uma indisponibilidade longa pode levar uma mensagem válida à DLQ após cinco recebimentos e exigir redrive operacional; alerting não faz parte desta entrega.
 
 O consumer é ativado apenas nas instâncias configuradas para o papel de worker. Durante o graceful shutdown, deixa de buscar novas mensagens, aguarda até 25 s pelos itens em processamento e reserva a janela restante até 30 s para devolver imediatamente a visibilidade dos itens que não concluíram. Mensagens recebidas em lote que ainda não iniciaram processamento também têm a visibilidade devolvida, evitando mantê-las indisponíveis durante o drain. O que não commitou não é marcado como processado.
 
@@ -356,7 +357,7 @@ Para REFUND ou ROLLBACK, referência ausente significa que referenceExternalTran
 
 Na submissão, a transação reserva a Wager, trava a Wallet e grava PENDING_REFERENCE com attempts=0, expiresAt=createdAt+6h, primeira tentativa em aproximadamente 5 s e resultBalance do aceite. O evento WagerTransactionPendingReference entra na mesma Outbox; depois do commit, HTTP responde 202 ou o consumer envia ACK.
 
-Cada instância executará ticks de 5 s, sem líder. Uma iteração:
+Cada instância executa ticks de 5 s, sem líder. Uma iteração:
 
 1. abre transação e seleciona uma Wager elegível por nextAttemptAt/id com FOR UPDATE SKIP LOCKED LIMIT 1;
 2. mantém esse row lock até o commit;
@@ -364,7 +365,7 @@ Cada instância executará ticks de 5 s, sem líder. Uma iteração:
 4. se a referência existir, trava a Wallet, relê e valida status, kind, provider, player, Wallet, moeda, rodada, magnitude e reversão anterior do mesmo kind;
 5. processa ou rejeita, atualiza resultBalance, cria ledger e eventos quando aplicável e commita.
 
-Após uma busca ausente, o atraso será:
+Após uma busca ausente, o atraso é:
 
     min(300 s, 5 s × 2^(attempts − 1)) × jitter[0.8,1.2]
 
@@ -394,11 +395,11 @@ Backoff:
 
     min(60 s, 1 s × 2^(attempts − 1)) × jitter[0.8,1.2]
 
-Não existe limite terminal para um evento confirmado. attempts serve para telemetria e backoff; o item continua elegível até publicação. Outbox lag crescente gera alerta.
+Não existe limite terminal para um evento confirmado. attempts serve para telemetria e backoff; o item continua elegível até publicação. As métricas expõem backlog e idade para monitoramento externo, mas o serviço não implementa alerting.
 
 O token do claim é o INSTANCE_ID do processo, o mesmo que identifica a instância nos logs, então uma linha ainda travada aponta para quem a segurava.
 
-O laço reclama uma mensagem por vez. Depois de publicar tenta a próxima imediatamente; sem nada elegível espera 500 ms; depois de um erro inesperado espera 2 s. O desligamento interrompe a espera ociosa em vez de aguardá-la, e o envio em andamento termina antes de o processo sair. Só a instância com o papel outbox-publisher roda o laço, e só o papel api abre porta HTTP; os demais carregam o mesmo binário sem iniciar o laço.
+O laço reclama uma mensagem por vez. Depois de publicar tenta a próxima imediatamente; sem nada elegível espera 500 ms; depois de um erro inesperado espera 2 s. O desligamento interrompe a espera ociosa em vez de aguardá-la, e o envio em andamento termina antes de o processo sair. Só a instância com o papel outbox-publisher roda esse laço. Todo papel abre a porta HTTP para `/health/live`, `/health/ready` e `/metrics`; somente `api` habilita as rotas de negócio.
 
 ### 9.2 Janelas de crash
 
@@ -417,7 +418,7 @@ A atomicidade termina no registro da Outbox: fato financeiro e intenção de pub
 
 SQS FIFO preserva a ordem em que as publicações chegam ao broker, não a ordem de commit. O desenho não promete ordenação por ocorrência.
 
-A fila de saída será wager-events.fifo. MessageDeduplicationId será eventId. MessageGroupId seguirá aggregateId: transactionId nos eventos da Wager e walletId em WalletBalanceChanged.
+A fila de saída é wager-events.fifo. MessageDeduplicationId é eventId. MessageGroupId segue aggregateId: transactionId nos eventos da Wager e walletId em WalletBalanceChanged.
 
 Eventos mínimos:
 
@@ -428,7 +429,7 @@ Eventos mínimos:
 | WagerTransactionPendingReference | referência ainda ausente | transactionId | identificação da Wager/provider/Wallet, kind, referência externa e money |
 | WalletBalanceChanged | somente quando balance muda | walletId | transactionId, direction, money, balanceBefore, balanceAfter e walletVersion |
 
-IntegrationEvent<T> será uma classe abstrata que concentra eventId, aggregateId, correlationId, causationId, occurredAt, data e toJSON. Cada evento da tabela será uma subclasse concreta; eventType e version pertencem ao tipo, não a strings soltas no call site.
+IntegrationEvent<T> é uma classe abstrata que concentra eventId, aggregateId, correlationId, causationId, occurredAt, data e toJSON. Cada evento da tabela é uma subclasse concreta; eventType e version pertencem ao tipo, não a strings soltas no call site.
 
 Os payloads usam MoneyProps, nunca a instância Money. Cada tipo começa em version 1; mudança aditiva preserva versão e mudança incompatível cria nova versão coexistente.
 
@@ -468,9 +469,9 @@ Consultas:
 - GET /wagering/transactions/:transactionId;
 - GET /providers/:providerId/wagering/transactions/:externalTransactionId.
 
-O cursor do ledger será base64url opaco de createdAt+id. A busca usa keyset por (created_at,id) descendente e não depende da ordenação do UUID v7. limit tem default 50, mínimo 1 e máximo 200.
+O cursor do ledger é base64url opaco de createdAt+id. A busca usa keyset por (created_at,id) descendente e não depende da ordenação do UUID v7. limit tem default 50, mínimo 1 e máximo 200.
 
-A página de ledger terá items, nextCursor e hasMore. As consultas de Wager devolverão uma TransactionView com status, failureCode e resultBalance persistidos.
+A página de ledger tem items, nextCursor e hasMore. As consultas de Wager devolvem uma TransactionView com status, failureCode e resultBalance persistidos.
 
 GET /health/live verifica somente processo. GET /health/ready verifica PostgreSQL e SQS separadamente e retorna 200 ou 503. Ambos são públicos.
 
@@ -478,11 +479,11 @@ GET /health/live verifica somente processo. GET /health/ready verifica PostgreSQ
 
 Wallet.balance é o saldo materializado para processamento rápido; wallet_ledger_entry é a trilha auditável.
 
-POST /wallets/:walletId/reconciliation abrirá:
+POST /wallets/:walletId/reconciliation abre:
 
     BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY
 
-No mesmo snapshot, a consulta lerá o saldo da Wallet e calculará:
+No mesmo snapshot, a consulta lê o saldo da Wallet e calcula:
 
     COALESCE(SUM(CASE
       WHEN direction = 'CREDIT' THEN amount
@@ -493,79 +494,89 @@ O COALESCE é necessário porque uma Wallet aberta com saldo zero não possui OP
 
 A resposta contém storedBalance, calculatedBalance, difference, consistent e checkedEntries. Wallet inexistente retorna 404. Wallet existente retorna 200 mesmo quando há divergência.
 
-Reconciliação nunca atualiza saldo ou ledger. Reparar automaticamente esconderia o defeito e exigiria escolher uma fonte como correta sem contexto operacional. Uma diferença gera resposta explícita, log e métrica. O custo cresce linearmente com o histórico da Wallet; não haverá snapshot incremental nesta entrega.
+Reconciliação nunca atualiza saldo ou ledger. Reparar automaticamente esconderia o defeito e exigiria escolher uma fonte como correta sem contexto operacional. Uma diferença gera resposta explícita, log e métrica. O custo cresce linearmente com o histórico da Wallet; não há snapshot incremental nesta entrega.
 
 ## 12. Observabilidade
 
-O desenho separa três sinais porque eles respondem a perguntas diferentes:
+Dois sinais são entregues, e respondem a perguntas diferentes:
 
-| Sinal | Responsabilidade |
-|---|---|
-| JSON logs em stdout | eventos discretos e erros classificados |
-| Prometheus em GET /metrics | comportamento agregado e alertas |
-| OpenTelemetry traces | caminho e latência de uma execução individual |
+| Sinal | Responsabilidade | Estado |
+|---|---|---|
+| JSON logs em stdout | eventos discretos e erros classificados | entregue |
+| Prometheus em `GET /metrics` | comportamento agregado para monitoramento externo | entregue |
+| OpenTelemetry traces | caminho e latência de uma execução individual | opcional pelo README §12, **não implementado** |
 
-Logs carregarão correlationId e, quando existirem, messageId, transactionId, walletId e providerId. Com um span ativo, também receberão traceId e spanId. Assim um erro encontrado no log leva ao trace correspondente sem trocar o backend de logs. Payload financeiro completo, amount, balance, credenciais e dados sensíveis ficam de fora.
+Logs carregam `correlationId` e, quando existem, `messageId`, `brokerMessageId`, `transactionId`, `walletId`, `providerId`, `kind`, `status` e `idempotentReplay`. `messageId` é o ID autoral do envelope e `brokerMessageId` é o identificador entregue pelo SQS. Payload financeiro completo, `amount`, `balance`, credenciais e dados sensíveis ficam de fora; o TST-045 percorre objetos e arrays recursivamente, rejeita chaves proibidas em qualquer profundidade e também verifica os valores movimentados, inclusive numa divergência real de reconciliação.
 
-Os três identificadores de correlação têm papéis distintos:
+Os três identificadores de correlação têm papéis distintos: `correlationId` é controlado pela aplicação e acompanha a operação de negócio, aceito do provedor no HTTP e derivado deterministicamente de `(consumerName, messageId)` no SQS; `causationId` identifica a causa imediata de um `IntegrationEvent`; e nenhum deles substitui `messageId`, a chave da Inbox ou a `Idempotency-Key`.
 
-- correlationId é controlado pela aplicação e acompanha a operação de negócio;
-- traceId/spanId pertencem ao contexto técnico do OpenTelemetry;
-- causationId identifica a causa imediata de um IntegrationEvent.
+### 12.1 Métricas expostas
 
-Nenhum deles substitui messageId, a chave da Inbox ou a Idempotency-Key. HTTP aceita ou gera correlationId e abre o contexto do request. SQS transporta trace context em message attributes quando presente, preservando o envelope da aplicação. Em saltos duráveis, como Outbox e pending reference, traceparent/tracestate podem ser persistidos como metadata técnica nullable junto ao trabalho, fora do payloadHash e do contrato financeiro. O publisher liga seu span ao contexto armazenado e injeta o contexto atual nos attributes da mensagem de saída; outros workers criam spans ou links quando o contexto é válido e iniciam novo trace quando ele não existe. Processar nunca depende dessa metadata.
+`GET /metrics` responde com o `contentType` do `Registry` próprio da aplicação — nunca o registry default do `prom-client`, e sem `collectDefaultMetrics()`. O endpoint é fino: lê o registry e devolve o texto.
 
-A topologia de tracing será:
+| Métrica | Tipo | Labels |
+|---|---|---|
+| `wager_transactions_total` | Counter | `status`, `kind`, `source` |
+| `wager_duplicates_total` | Counter | `layer` (`business`, `inbox`) |
+| `wager_retries_total` | Counter | `component`, `reason` |
+| `wager_processing_duration_seconds` | Histogram | `source`, `kind`, `outcome` |
+| `sqs_dlq_routed_total` | Counter | `reason` |
+| `sqs_dlq_visible_messages` | Gauge | — |
+| `wallet_lock_wait_seconds` | Histogram | `outcome` |
+| `wallet_lock_conflicts_total` | Counter | `reason` (`lock_timeout`, `deadlock`) |
+| `pending_reference_attempts_total` | Counter | `outcome` |
+| `outbox_publish_duration_seconds` | Histogram | `outcome` |
+| `outbox_pending_messages` | Gauge | — |
+| `outbox_oldest_pending_age_seconds` | Gauge | — |
+| `wallet_reconciliation_divergences_total` | Counter | — |
+| `http_requests_total` | Counter | `method`, `route`, `status` |
+| `http_request_duration_seconds` | Histogram | `method`, `route` |
 
-    Application
-    ├─ JSON logs ───────────────→ stdout
-    ├─ Prometheus metrics ──────→ GET /metrics
-    └─ OpenTelemetry SDK ─OTLP─→ OpenTelemetry Collector ─→ trace backend
+Todas as labels declaradas têm conjunto fechado. Nenhuma carrega `walletId`, `transactionId`, `providerId`, `messageId`, `correlationId`, `externalTransactionId`, `idempotencyKey` ou qualquer outro identificador: `reason` e `outcome` recebem categorias controladas dos call sites atuais, e `route` é o padrão de rota casado pelo Express, jamais a URL concreta. O teste unitário exercita todas as famílias e sua exposição, mas não promete detectar genericamente qualquer label nova de alta cardinalidade.
 
-O Collector delimita a aplicação do armazenamento. Um backend local leve, como Jaeger, pode ser escolhido na implementação, mas não faz parte do contrato nem da correção do serviço. Não haverá ClickHouse, export obrigatório de logs pelo OTel, substituição de Prometheus por OTel Metrics ou dashboard elaborado nesta entrega.
+`wallet_lock_wait_seconds` observa **toda** tentativa de adquirir o `FOR UPDATE` da Wallet, inclusive a que termina em erro, sem limiar arbitrário de "contenção": uma espera longa e bem-sucedida fica na distribuição do histograma. `wallet_lock_conflicts_total` só incrementa quando o PostgreSQL recusou a aquisição, classificado por SQLSTATE — `55P03` é `lock_timeout` e `40P01` é `deadlock`.
 
-Auto-instrumentação padrão será preferida, quando madura e compatível, para HTTP server/client, PostgreSQL e AWS SDK/SQS. Instrumentação manual fica restrita aos limites que explicam o desafio: wager.submit, idempotency.reserve, wallet.lock, inbox.process, pending_reference.process, outbox.publish e reconciliation. Não vale duplicar cada span de infraestrutura nem instrumentar cada função do ORM.
+Os três Gauges descrevem o último estado coletado e por isso não são lidos no scrape. Um coletor em background, `OperationalMetricsCollector`, inicia uma coleta ao subir e, depois, roda em todo processo a cada 15 s; consulta a outbox no PostgreSQL e a DLQ por `GetQueueAttributes` e escreve os valores no registry. Ler isso dentro do `collect()` do `prom-client` faria `GET /metrics` esperar por PostgreSQL e SQS naquele instante. Se uma coleta falha, o erro é logado, `/metrics` continua disponível e preserva a última amostra bem-sucedida; a freshness fica sem limite até a dependência voltar. Como os três Gauges são fatos globais reportados por todas as instâncias, a leitura correta em PromQL é `max by (...)`.
 
-Os spans podem ter wager.kind, wager.source, wager.status, idempotent_replay, transaction.id, wallet.id, message.id e outbox.event_type. IDs de alta cardinalidade ajudam numa execução individual, mas nunca viram labels Prometheus.
+O contador de reconciliação existe porque o README §9 exige que divergência seja contabilizada em métrica, além de logada e sinalizada na resposta. Nada nesse caminho corrige saldo.
 
-GET /metrics exporá métricas Prometheus com labels fechadas: requisições e latência HTTP; transações por status/kind/origem e duplicatas; latência, retries e DLQ do SQS; tentativas de pending; tentativas, duração, quantidade e idade da Outbox; e reconciliação. `wallet_lock_wait_seconds` observa toda tentativa de adquirir o `FOR UPDATE`, inclusive a espera que termina em falha; `wallet_lock_conflicts_total{reason="lock_timeout"|"deadlock"}` conta falhas classificadas pelo PostgreSQL. Aquisições que esperaram e tiveram sucesso ficam na distribuição do histograma, sem um limiar arbitrário de “contenção”. A DLQ expõe `sqs_dlq_visible_messages` a partir dos atributos da fila e `sqs_dlq_routed_total{reason}` para roteamentos diretos. Outbox pending e lag serão lidos do PostgreSQL no scrape ou por coletor independente do publisher, para continuarem visíveis quando a publicação parar.
+Liveness não consulta dependências. Readiness diferencia PostgreSQL e SQS para tornar a falha operacionalmente diagnosticável. Health e métricas respondem em qualquer papel, inclusive num processo sem `api`.
 
-Sampling de traces será configurável. Desenvolvimento pode usar amostragem alta; runtime normal usa uma razão definida; todo teste de carga registra a configuração. Um benchmark pesado não será automaticamente traçado a 100%, porque a telemetria também custa CPU, rede e armazenamento. É válido comparar uma execução diagnóstica com tracing e outra com amostragem menor, desde que a metodologia não misture os resultados.
-
-Exemplars ligando histogramas de latência HTTP, espera de Wallet lock ou publicação da Outbox a um trace são uma melhoria opcional. Só entram se a integração escolhida os fornecer sem redesenhar as métricas.
-
-Liveness não consulta dependências. Readiness diferencia PostgreSQL e SQS para tornar a falha operacionalmente diagnosticável. Se SDK, Collector ou backend de traces estiverem indisponíveis, todas as garantias financeiras, de Inbox, ACK, locks e Outbox permanecem iguais.
+Ficam fora desta entrega, todos opcionais pelo README §12: OpenTelemetry e propagação de trace context, Collector, backend de traces, exemplars e dashboard. Nenhuma garantia financeira, de Inbox, ACK, lock ou Outbox depende de telemetria.
 
 ## 13. Estratégia de testes
 
-O caminho principal será docker-compose.test.yml controlado por scripts Bun. PostgreSQL 16 e LocalStack serão serviços reais em containers. O estado deverá ser isolado ou resetado deterministicamente entre suítes. Três processos reais serão iniciados com Bun.spawn contra a mesma infraestrutura.
+O caminho principal é `docker-compose.test.yml` controlado por scripts Bun. PostgreSQL 16 e LocalStack são serviços reais em containers, e nenhuma suíte substitui os dois por mock. O schema é recriado por `migrate:fresh` antes de cada execução, e três processos reais são iniciados com `Bun.spawn` contra a mesma infraestrutura.
 
-Nenhum resultado é declarado agora; estes são comportamentos que os testes deverão comprovar.
+Os casos de uso rodam nos testes sob a **role de runtime** `wagering_app`, nunca sob a credencial de migration. A distinção importa: um `GRANT` de coluna que falte deixa de ser um defeito silencioso e vira falha de suíte. Só o que precisa de privilégio elevado — DDL das migrations, `DELETE` de fixture, adulteração deliberada do ledger — usa `wagering_migrator`.
 
-Testes de unidade cobrirão Money, Wallet, state machine, todos os kinds, reversões da opção B e payloadHash. Integração real cobrirá migrations e constraints, atomicidade entre Wallet/Wager/ledger/Inbox/Outbox, contrato HTTP, SQS, pending worker, Outbox e reconciliação. O conflito de moeda terá um caso completo: BET USD contra Wallet BRL termina REJECTED/CURRENCY_MISMATCH com snapshot BRL, sem alterar saldo, version, updatedAt ou ledger.
+Estado atual, executado: **178 testes de unidade, 144 de integração e 11 de concorrência**, com `bun run typecheck` limpo.
 
-Os testes de concorrência e crash usarão paralelismo real, não mocks sequenciais. Os cenários centrais serão:
+Testes de unidade cobrem Money, Wallet, state machine, todos os kinds, reversões da opção B, payloadHash, backoffs, envelope SQS, classificação de erro do PostgreSQL, exposição de métricas e o ponto de extensão de identidade. Integração real cobre migrations e constraints, atomicidade entre Wallet/Wager/ledger/Inbox/Outbox, contrato HTTP completo, SQS, pending worker, Outbox, reconciliação, papéis e logging. O conflito de moeda tem caso completo: BET USD contra Wallet BRL termina REJECTED/CURRENCY_MISMATCH com snapshot BRL, sem alterar saldo, version, updatedAt ou ledger.
 
-1. a mesma BET 50 vezes em paralelo: uma Wager e um débito;
+Os testes de concorrência e crash usam paralelismo real, liberado por barreira explícita, nunca por sorte de escalonamento. Os cenários entregues são:
+
+1. a mesma BET 50 vezes em paralelo: uma Wager, um débito e 49 replays;
 2. duas BET de 80.00 sobre saldo 100.00: uma PROCESSED, uma REJECTED e saldo 20.00;
-3. Wallets distintas em paralelo e três processos contra o mesmo banco;
-4. a mesma operação por HTTP e SQS, incluindo redelivery idêntica e Inbox divergente;
-5. crash antes do commit, depois do commit HTTP e depois do commit SQS antes do ACK;
-6. REFUND/ROLLBACK antes da referência, referência confirmada durante a decisão de expiração, dois pending workers e reversões concorrentes;
-7. dois publishers, crash após claim e crash após publish antes de publishedAt;
-8. PostgreSQL/SQS indisponíveis e restart com estado pendente;
-9. tentativas diretas de UPDATE/DELETE no ledger e constraints violadas;
-10. reconciliação durante atividade concorrente.
+3. Wallets distintas em paralelo, hot wallet e três processos contra o mesmo banco;
+4. Wallet travada por outra transação não bloqueia Wallet livre — não há lock global;
+5. mensagens distintas para a mesma Wallet, cada uma em seu próprio MessageGroupId, com o lock mantido explicitamente até pelo menos dois workers disputarem a Wallet e com participação confirmada por instância;
+6. worker morto entre o commit e o ACK, num processo real: redelivery barrada pela Inbox e efeito financeiro único;
+7. restart dos três processos com requisições em voo: as mesmas identidades são reaplicadas nos processos novos, a quantidade exata de commits é consultada no banco e uma operação final é reconciliada; separadamente, a Outbox pendente deixada pelo worker morto é publicada por um publisher novo;
+8. dois publishers concorrentes sobre a mesma Outbox, e linha travada que é pulada por SKIP LOCKED em vez de esperada;
+9. REFUND entregue pela fila antes da BET que ele reverte, resolvido depois pelo worker de pendências;
+10. rollback total: falha real de constraint e falha lançada depois das escritas, sem resíduo em Wallet, Wager, ledger, Inbox ou Outbox;
+11. conflito de idempotência sob paralelismo real e reversões concorrentes sobre a mesma referência;
+12. tentativas diretas de UPDATE/DELETE/TRUNCATE no ledger e violação direta de constraints por SQL.
 
-Todo teste financeiro termina verificando:
+Todo teste que movimenta saldo termina verificando:
 
     wallet.balance == saldo reconstruído pelo ledger
-
 ### 13.1 Teste de carga — diferencial opcional escolhido
 
-O desafio não exige teste de carga nem define meta de RPS, mas esta entrega implementará o diferencial com k6 por:
+O desafio não exige teste de carga nem define meta de RPS. **Este diferencial não foi entregue**: não existe `bun run test:load` no `package.json`, e nenhum número de carga é afirmado em lugar nenhum desta documentação. O que segue é o desenho do experimento, registrado para que a decisão fique explícita e para que a implementação futura tenha metodologia definida antes de produzir número.
 
-    bun run test:load
+    bun run test:load    # planejado, não implementado
 
 O objetivo é produzir um experimento reproduzível e explicar o resultado, não maximizar um número isolado. O relatório registrará máquina/ambiente, quantidade de processos da aplicação, topologias de PostgreSQL e LocalStack/SQS, configuração do gerador, duração, VUs/concorrência, perfil do workload e razão de sampling OpenTelemetry.
 
@@ -593,7 +604,9 @@ Não haverá limiar artificial de sucesso em RPS. O relatório explicará gargal
 - numeric(20,2) tem teto finito, e a reconciliação síncrona cresce com o histórico do ledger.
 - Inbox e Outbox crescem indefinidamente: como a role de runtime não tem DELETE, qualquer purga exige a credencial de manutenção, e a política de retenção fica fora desta entrega.
 - Triggers e privilégios protegem a role da aplicação, não uma credencial de migration ou superuser.
-- Autenticação funcional foi omitida e ficou atrás de ProviderIdentityPort.
+- Autenticação funcional foi omitida. `ProviderIdentityPort` existe e está no caminho da submissão HTTP, mas o adapter atual confia na identidade declarada: qualquer chamador pode afirmar qualquer `providerId`.
+- OpenTelemetry e o teste de carga `bun run test:load` são opcionais e não foram implementados; a documentação não afirma número de carga algum.
+- Os três Gauges operacionais são amostrados a cada 15 s por processo e aparecem repetidos por instância. Depois de uma falha de coleta, a última amostra permanece exposta sem garantia de freshness até uma coleta voltar a funcionar.
 - A opção B permite REFUND e ROLLBACK diretos sobre a mesma referência, inclusive dois créditos sobre uma BET.
 - Uma referência opcional de WIN que ainda não existe não transforma a operação em PENDING_REFERENCE.
 - Tracing adiciona overhead e mostra apenas a amostra definida; toda análise de carga precisa declarar essa configuração.

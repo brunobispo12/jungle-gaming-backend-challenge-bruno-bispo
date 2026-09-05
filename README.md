@@ -38,13 +38,21 @@ O que existe e roda:
   lease, backoff exponencial com jitter até 5 min, e encerramento como `REJECTED` ao
   esgotar o TTL de 6 h ou as 100 tentativas — ou como `FAILED` quando a falha é
   determinística, em vez de culpar o provedor por um defeito nosso;
-- 174 testes de unidade, 119 de integração e 10 de concorrência com três processos reais
-  contra PostgreSQL e LocalStack reais.
+- `ProviderIdentityPort` com `TrustedProviderIdentityAdapter` no caminho real de
+  `POST /wagering/transactions`: é o ponto de extensão de autenticação que o desafio pede
+  quando ela não é implementada, e o `providerId` resolvido é o que entra no comando;
+- a superfície operacional — `/health/live`, `/health/ready` e `/metrics` — responde em
+  **qualquer papel**, inclusive num processo sem `api`, porque métricas de um consumer ou
+  de um publisher precisam ser raspáveis; sem o papel `api` a API de negócio responde 404;
+- 178 testes de unidade, 144 de integração e 11 de concorrência com três processos reais
+  contra PostgreSQL e LocalStack reais, com os casos de uso rodando sob a role de runtime
+  `wagering_app`, não sob a credencial de migration.
 
-**Ainda não implementados**, todos fora do que o desafio pontua ou marcados como opcionais
-em [`ARCHITECTURE.md`](ARCHITECTURE.md): autenticação (README §2 não pontua; o ponto de
-extensão é `ProviderIdentityPort`), tracing com OpenTelemetry e o teste de carga
-`bun run test:load`. Nada acima descreve comportamento que não tenha sido executado.
+**Ainda não implementados**, ambos opcionais pelo desafio: tracing com OpenTelemetry
+(README §12) e o teste de carga `bun run test:load` (README §14). Autenticação funcional
+também não existe (README §2 não pontua); o ponto de extensão é `ProviderIdentityPort`, e
+o adapter atual confia na identidade declarada. Nada acima descreve comportamento que não
+tenha sido executado.
 
 ## Pré-requisitos
 
@@ -129,8 +137,9 @@ apontá-las para a infraestrutura desejada.
 | `AWS_ENDPOINT_URL` | endpoint do SQS (LocalStack) |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | credenciais do cliente SQS |
 | `SQS_INPUT_QUEUE`, `SQS_DLQ_QUEUE`, `SQS_EVENTS_QUEUE` | nomes das filas |
-| `APP_ROLES` | papéis ativos nesta instância: `api`, `consumer`, `pending-worker`, `outbox-publisher`. Só `api` abre porta HTTP |
+| `APP_ROLES` | papéis ativos nesta instância: `api`, `consumer`, `pending-worker`, `outbox-publisher`. Todo papel abre a porta e serve health e `/metrics`; só `api` serve a API de negócio |
 | `PORT`, `INSTANCE_ID` | porta HTTP e identidade da instância nos logs e no lease da outbox |
+| `WALLET_LOCK_TIMEOUT_MS` | teto da espera pelo lock da wallet antes de virar falha transitória; default 20000, abaixo do visibility timeout de 60 s |
 
 ## Banco
 
