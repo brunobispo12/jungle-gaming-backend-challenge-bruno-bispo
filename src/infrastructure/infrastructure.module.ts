@@ -5,6 +5,7 @@ import { Global, Inject, Module, type OnApplicationShutdown } from '@nestjs/comm
 import { loadEnv, type AppEnv } from '@/bootstrap/env';
 import { JsonLogger } from './observability/json-logger';
 import { PostgresSqsOperationalMetrics } from './observability/operational-metrics';
+import { OperationalMetricsCollector } from './observability/operational-metrics.collector';
 import { PrometheusMetrics } from './observability/prometheus-metrics';
 import { runtimeOrmConfig } from './persistence/orm.config';
 import { APP_ENV, LOGGER, METRICS, ORM, SQS_CLIENT } from './tokens';
@@ -43,9 +44,23 @@ import { APP_ENV, LOGGER, METRICS, ORM, SQS_CLIENT } from './tokens';
     },
     {
       provide: METRICS,
-      inject: [ORM, SQS_CLIENT, APP_ENV],
-      useFactory: (orm: MikroORM, sqs: SQSClient, env: AppEnv): PrometheusMetrics =>
-        new PrometheusMetrics(new PostgresSqsOperationalMetrics(orm, sqs, env.queues.dlq)),
+      useFactory: (): PrometheusMetrics => new PrometheusMetrics(),
+    },
+    {
+      provide: OperationalMetricsCollector,
+      inject: [ORM, SQS_CLIENT, APP_ENV, METRICS, LOGGER],
+      useFactory: (
+        orm: MikroORM,
+        sqs: SQSClient,
+        env: AppEnv,
+        metrics: PrometheusMetrics,
+        logger: JsonLogger,
+      ): OperationalMetricsCollector =>
+        new OperationalMetricsCollector(
+          new PostgresSqsOperationalMetrics(orm, sqs, env.queues.dlq),
+          metrics,
+          logger.child({ worker: 'operational-metrics' }),
+        ),
     },
   ],
   exports: [APP_ENV, LOGGER, METRICS, ORM, SQS_CLIENT],

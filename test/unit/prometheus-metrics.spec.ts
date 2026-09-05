@@ -1,21 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { OperationalMetricsSource } from '@/infrastructure/observability/operational-metrics';
 import { PrometheusMetrics } from '@/infrastructure/observability/prometheus-metrics';
-
-class FixedOperationalMetrics implements OperationalMetricsSource {
-  async outboxState(): Promise<{ pending: number; oldestAgeSeconds: number }> {
-    return { pending: 2, oldestAgeSeconds: 7.5 };
-  }
-
-  async dlqVisibleMessages(): Promise<number> {
-    return 3;
-  }
-}
 
 describe('PrometheusMetrics', () => {
   test('expõe todas as famílias obrigatórias com labels de cardinalidade fechada', async () => {
-    const metrics = new PrometheusMetrics(new FixedOperationalMetrics());
+    const metrics = new PrometheusMetrics();
+    metrics.observeOperationalState({ pending: 2, oldestAgeSeconds: 7.5, dlqVisibleMessages: 3 });
 
     metrics.observeWager({
       source: 'http',

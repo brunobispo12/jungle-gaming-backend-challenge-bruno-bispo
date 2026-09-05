@@ -13,12 +13,8 @@ const app = await NestFactory.create(AppModule, { logger, bufferLogs: false });
 
 app.enableShutdownHooks();
 
-// Every role shares one binary; only the api role opens a port, the workers just
-// need the container wired up and their lifecycle hooks fired.
-if (env.roles.includes('api')) {
-  await app.listen(env.port, '0.0.0.0');
-  logger.write('info', 'application started', { port: env.port, nodeEnv: env.nodeEnv });
-} else {
-  await app.init();
-  logger.write('info', 'application started', { nodeEnv: env.nodeEnv });
-}
+// Every role opens the port, because health and metrics have to be reachable on
+// a consumer or a publisher too. Only the api role serves the business routes.
+await app.listen(env.port, '0.0.0.0');
+
+logger.write('info', 'application started', { port: env.port, nodeEnv: env.nodeEnv });

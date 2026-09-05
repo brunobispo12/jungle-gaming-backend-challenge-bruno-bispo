@@ -5,7 +5,11 @@ import type {
   MetricsPort,
   WagerMetricObservation,
 } from '@/application/ports';
-import type { OperationalMetricsSource } from './operational-metrics';
+export interface OperationalState {
+  readonly pending: number;
+  readonly oldestAgeSeconds: number;
+  readonly dlqVisibleMessages: number;
+}
 
 const PROCESSING_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30];
 const LOCK_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20];
@@ -24,8 +28,11 @@ export class PrometheusMetrics implements MetricsPort, MetricsExporter {
   private readonly reconciliationDivergences: Counter;
   private readonly httpRequests: Counter<'method' | 'route' | 'status'>;
   private readonly httpRequestDuration: Histogram<'method' | 'route'>;
+  private readonly outboxPending: Gauge;
+  private readonly outboxOldestAge: Gauge;
+  private readonly dlqVisible: Gauge;
 
-  constructor(source: OperationalMetricsSource) {
+  constructor() {
     const registers = [this.registry];
 
     this.transactions = new Counter({
@@ -104,34 +111,29 @@ export class PrometheusMetrics implements MetricsPort, MetricsExporter {
       registers,
     });
 
-    const outboxPending = new Gauge({
+    // Sampled by the collector, never by the scrape: reading them here would make
+    // GET /metrics wait on PostgreSQL and SQS being reachable at that instant.
+    this.outboxPending = new Gauge({
       name: 'outbox_pending_messages',
       help: 'Current number of committed outbox messages awaiting publication.',
       registers,
-      async collect() {
-        this.set((await source.outboxState()).pending);
-      },
     });
-    const outboxOldestAge = new Gauge({
+    this.outboxOldestAge = new Gauge({
       name: 'outbox_oldest_pending_age_seconds',
       help: 'Age of the oldest committed outbox message awaiting publication.',
       registers,
-      async collect() {
-        this.set((await source.outboxState()).oldestAgeSeconds);
-      },
     });
-    const dlqVisible = new Gauge({
+    this.dlqVisible = new Gauge({
       name: 'sqs_dlq_visible_messages',
       help: 'Approximate number of messages currently visible in the wager DLQ.',
       registers,
-      async collect() {
-        this.set(await source.dlqVisibleMessages());
-      },
     });
+  }
 
-    void outboxPending;
-    void outboxOldestAge;
-    void dlqVisible;
+  observeOperationalState(state: OperationalState): void {
+    this.outboxPending.set(state.pending);
+    this.outboxOldestAge.set(state.oldestAgeSeconds);
+    this.dlqVisible.set(state.dlqVisibleMessages);
   }
 
   get contentType(): string {
