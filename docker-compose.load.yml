@@ -1,0 +1,32 @@
+name: wagering-load
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wagering_migrator
+      POSTGRES_PASSWORD: wagering_migrator
+      POSTGRES_DB: wagering
+    ports:
+      - "55434:5432"
+    volumes:
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering_migrator -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: sqs
+      DEBUG: "0"
+    ports:
+      - "54567:4566"
+    volumes:
+      - ./docker/localstack/init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wager-transactions.fifo >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40

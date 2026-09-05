@@ -48,8 +48,9 @@ O que existe e roda:
   contra PostgreSQL e LocalStack reais, com os casos de uso rodando sob a role de runtime
   `wagering_app`, não sob a credencial de migration.
 
-**Ainda não implementados**, ambos opcionais pelo desafio: tracing com OpenTelemetry
-(README §12) e o teste de carga `bun run test:load` (README §14). Autenticação funcional
+O diferencial de carga está disponível separadamente em `bun run test:load`, com k6,
+cinco perfis e validação financeira no PostgreSQL após cada cenário.
+Tracing com OpenTelemetry (README §12) continua não implementado. Autenticação funcional
 também não existe (README §2 não pontua); o ponto de extensão é `ProviderIdentityPort`, e
 o adapter atual confia na identidade declarada. Nada acima descreve comportamento que não
 tenha sido executado.
@@ -112,7 +113,7 @@ bun run test:infra:down
 |---|---|
 | `bun install` | instala dependências |
 | `bun run typecheck` | TypeScript em modo estrito, sem emitir |
-| `bun run test` | suíte de unidade do domínio, sem container |
+| `bun run test` | suíte de unidade do domínio e do harness de carga, sem container |
 | `bun run infra:up` | sobe PostgreSQL, LocalStack e as três instâncias |
 | `bun run infra:down` | derruba a stack e remove volumes |
 | `bun run start` | roda a aplicação localmente contra a infraestrutura já no ar |
@@ -122,8 +123,111 @@ bun run test:infra:down
 | `bun run migrate:fresh` | reverte tudo e reaplica |
 | `bun run test:integration` | sobe a infra de teste, recria o schema e roda a suíte |
 | `bun run test:concurrency` | sobe três processos reais e roda os cenários do README §13 |
+| `bun run test:load` | k6: cinco perfis, métricas e verificação financeira com stack isolada |
 | `bun run test:infra:up` | sobe só a infraestrutura de teste |
 | `bun run test:infra:down` | derruba a infraestrutura de teste |
+
+## Teste de carga
+
+Requer o executável [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/) no PATH
+(validado com v2.0.0), Bun e Docker Compose. Não roda em nenhuma suíte normal:
+
+```bash
+bun run test:load
+```
+
+O runner sobe `docker-compose.load.yml`: PostgreSQL em **55434**, LocalStack em **54567**
+e três processos Bun em **3201–3203**, com todos os papéis e configurações financeiras
+normais. Aplica somente migrations pendentes. Cria fixtures novas por execução, sem
+apagar históricos; registra a quantidade de transações pré-existentes. Purga a fila de
+eventos antes de medir — ela não tem consumidor downstream, cresce a cada execução e o
+broker vai ficando mais lento para aceitar publicações, o que degradaria a comparação
+entre execuções. Ao terminar, encerra seus processos e deixa os containers/dados
+disponíveis para inspeção.
+
+Defaults: **30 s, 12 VUs por perfil**, sem pausa entre requisições. A sequência é wallets
+distintas (uma por VU), hot wallet (uma para todos), hot wallet com saldo escasso,
+idempotência (mesmo fato para todos) e mix determinístico BET/BET/WIN/LOSS, com
+**5 operações SQS/s** em paralelo no mix.
+Cada operação vale `1.00 BRL`. As wallets abrem com `1000000000.00 BRL`, para medir
+processamento sem transformar o cenário em rejeições por falta de saldo — exceto o perfil
+escasso, que abre com `5.00 BRL` e cicla BET/BET/WIN justamente para prender o saldo na
+fronteira de zero e manter o caminho de rejeição sob contenção durante toda a execução.
+Uma em cada cinco operações SQS é enviada duas vezes com a mesma identidade autoral
+e deduplication IDs diferentes, exercitando a Inbox além da deduplicação FIFO.
+
+Antes da medição há uma prova causal de independência: o runner segura o lock de uma
+wallet, confirma que uma operação da aplicação está bloqueada por essa conexão, e exige
+que outra wallet conclua enquanto a primeira continua esperando. Esse probe não entra
+nos percentis do benchmark.
+
+| Env | Default / significado |
+|---|---|
+| `LOAD_DURATION` | `30s` por perfil; inteiro com sufixo `s` ou `m` |
+| `LOAD_VUS` | `12`; VUs constantes e uma requisição em voo por VU |
+| `LOAD_SQS_RPS` | `5`; taxa oferecida pelo produtor SQS no perfil misto |
+| `LOAD_DRAIN_TIMEOUT_SECONDS` | `180`; limite para concluir Inbox/Outbox após cada perfil |
+| `LOAD_P95_MS` | ausente; SLO opcional explícito para p95 das submissões, em ms |
+| `LOAD_BASE_URL` | ausente: gerencia a stack isolada; presente: usa a stack fornecida. Aceita URLs separadas por vírgula |
+| `LOAD_METRICS_URLS` | mesmas URLs de negócio; informe todas as instâncias se a base for um balanceador |
+| `LOAD_DATABASE_URL` | conexão **runtime** da stack externa; obrigatória com `LOAD_BASE_URL` |
+| `LOAD_AWS_ENDPOINT_URL` | endpoint SQS da stack externa; obrigatório com `LOAD_BASE_URL` |
+| `LOAD_INPUT_QUEUE`, `LOAD_EVENTS_QUEUE`, `LOAD_DLQ_QUEUE` | nomes padrão da aplicação |
+
+Exemplo PowerShell para uma execução curta:
+
+```powershell
+$env:LOAD_DURATION = '10s'
+$env:LOAD_VUS = '6'
+bun run test:load
+Remove-Item Env:LOAD_DURATION, Env:LOAD_VUS
+```
+
+No modo externo, a stack deve ser de teste, estar ociosa, usar `wagering_app`, ter os
+papéis consumer/outbox habilitados e filas de entrada/DLQ vazias. Não há migration nem
+gerenciamento de processos externos. As verificações financeiras são limitadas às
+wallets da execução; métricas são deltas por instância e podem incluir tráfego de outros
+clientes. Uma única URL não comprova distribuição por três instâncias. As credenciais
+AWS usam `AWS_REGION`, `AWS_ACCESS_KEY_ID` e `AWS_SECRET_ACCESS_KEY` (defaults locais).
+
+Artefatos em `artifacts/load/<run-id>/`, ignorados pelo Git: `summary.md`,
+`environment.json`, resumo k6, relatório SQL, logs da aplicação e snapshots Prometheus
+antes/depois e a cada 2 s. O report inclui requests HTTP totais, submissões/s, taxa de
+erro, p50/p95/p99, duração de carga/total/drain, conflitos/espera de locks, backlog da
+Outbox e o pico de `outbox_oldest_pending_age_seconds` observado no perfil.
+O resumo de replay exclui GETs de consulta canônica dos percentis de submissão, mas os
+inclui no total HTTP. Falhas também entram nos percentis; não há retry HTTP automático.
+
+**Critério de sucesso:** zero erro HTTP/contrato, todos os checks k6 válidos, operações
+persistidas em quantidade igual às primeiras aplicações observadas, um único efeito na
+tempestade de replay, nenhuma wallet negativa, ledger reconciliado, hashes/identidades
+coerentes, Inbox processada e todos os eventos esperados publicados sem claim residual.
+No perfil escasso soma-se o caminho de recusa: toda rejeição carrega `INSUFFICIENT_FUNDS`,
+não gera lançamento nem altera saldo, emite exatamente um `WagerTransactionRejected`, e o
+perfil reprova se nenhuma rejeição ou nenhum débito tiver ocorrido.
+Timeout de drain, DLQ, divergência ou threshold falho terminam com exit não zero e
+preservam os artefatos. Não há meta de throughput ou latência inventada pelo benchmark.
+
+O modelo é fechado: quando o serviço fica lento, o cliente reduz a taxa. Não é um teste
+de chegada aberta nem uma promessa de capacidade. Os gauges podem estar atrasados pelo
+collector de 15 s; amostras SQL mostram o backlog real do cenário. Essas amostras não são
+gratuitas: o monitor consulta o banco a cada 2 s durante a carga e a cada 200 ms durante o
+drain, no mesmo PostgreSQL que os publishers usam, e esse custo está dentro das durações
+reportadas. Integridade é binária: os saldos mínimos históricos reportam folga financeira,
+não uma distância até uma race — exceto no perfil escasso, onde o mínimo histórico é o
+próprio zero e a folga medida é nula por construção.
+A fila de eventos acumula mensagens publicadas porque não há consumidor downstream no
+produto; isso é diferente de Outbox não publicada, e é o motivo de o runner purgá-la antes
+de cada medição gerenciada. Para um banco novamente vazio, encerre
+a stack de carga entre execuções (`docker compose -f docker-compose.load.yml down -v`);
+esse comando remove somente os dados reproduzíveis dessa stack.
+
+[`test/load/RESULTS.md`](test/load/RESULTS.md) é **gerado pelo runner**, não escrito à mão:
+o texto de método e limitações é fixo, e todo número, tabela e comparação sai do run. Cada
+execução sobrescreve o arquivo, inclusive quando um perfil reprova — o relatório é o registro
+da execução, não uma afirmação separada dela. Os dados brutos ficam em `artifacts/load/`,
+ignorados pelo Git. O cálculo de deltas e percentis do harness tem testes próprios, que rodam
+junto com `bun run test` por não precisarem de container.
 
 ## Configuração
 

@@ -17,9 +17,10 @@
     "migrate:up": "bun run scripts/migrate.ts up",
     "migrate:down": "bun run scripts/migrate.ts down",
     "migrate:fresh": "bun run scripts/migrate.ts fresh",
-    "test": "bun test test/unit",
+    "test": "bun test test/unit test/load/metrics.spec.ts",
     "test:integration": "bun run scripts/test-integration.ts",
-    "test:concurrency": "bun run scripts/test-concurrency.ts"
+    "test:concurrency": "bun run scripts/test-concurrency.ts",
+    "test:load": "bun run scripts/test-load.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.700.0",
