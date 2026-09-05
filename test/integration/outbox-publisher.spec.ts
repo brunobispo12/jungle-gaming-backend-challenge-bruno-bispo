@@ -157,4 +157,56 @@ describe('PublishOutboxMessageUseCase sobre PostgreSQL e SQS reais', () => {
     expect(row.last_error).not.toBeNull();
     expect(row.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
   });
+
+  // The property, not the schedule: whatever order the two publishers interleave
+  // in, every row is published exactly once and none is left behind.
+  test('dois publishers concorrentes drenam a mesma outbox sem perder nem repetir', async () => {
+    const pending = 30;
+    for (let index = 0; index < pending; index += 1) {
+      await seedOutboxMessage(sql);
+    }
+
+    const barrier = gate();
+    const drain = async (publisherId: string): Promise<string[]> => {
+      const outcomes: string[] = [];
+      await barrier.wait;
+
+      for (let guard = 0; guard <= pending * 2; guard += 1) {
+        const outcome = await useCaseOf(publisherId).run();
+        outcomes.push(outcome);
+        if (outcome === 'idle') {
+          return outcomes;
+        }
+      }
+      throw new Error(`${publisherId} não drenou a outbox dentro do limite`);
+    };
+
+    const both = Promise.all([drain('instance-1'), drain('instance-2')]);
+    barrier.open();
+    const outcomes = (await both).flat();
+
+    expect(outcomes.filter((outcome) => outcome === 'published')).toHaveLength(pending);
+
+    const rows = (await sql`
+      SELECT
+        count(*) FILTER (WHERE published_at IS NULL)::int  AS unpublished,
+        count(*) FILTER (WHERE claimed_by IS NOT NULL)::int AS still_claimed
+      FROM outbox_message
+    `) as { unpublished: number; still_claimed: number }[];
+
+    expect(rows[0]).toEqual({ unpublished: 0, still_claimed: 0 });
+  }, 60_000);
 });
+
+interface Gate {
+  readonly wait: Promise<void>;
+  open(): void;
+}
+
+function gate(): Gate {
+  let open!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}

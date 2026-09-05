@@ -1,12 +1,18 @@
 import type { SQL } from 'bun';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 
 import { ApplicationError, ErrorCode } from '@/application/errors';
 import type { LedgerCursor } from '@/application/ports';
 import type { SubmitWagerCommand } from '@/application/use-cases/submit-wager-transaction';
 import { WagerTransactionKind } from '@/domain/wager-transaction';
 import type { WalletLedgerEntry } from '@/domain/wallet-ledger-entry';
-import { MIGRATOR_URL, connect, uniqueSuffix, uuid } from './support/database';
+import {
+  MIGRATOR_URL,
+  connect,
+  expectWalletsMatchLedger,
+  uniqueSuffix,
+  uuid,
+} from './support/database';
 import { bootUseCases, type UseCases } from './support/use-cases';
 
 let app: UseCases;
@@ -22,6 +28,12 @@ afterAll(async () => {
   await sql.end();
 });
 
+const touched: string[] = [];
+
+afterEach(async () => {
+  await expectWalletsMatchLedger(sql, touched.splice(0));
+});
+
 interface Wallet {
   readonly id: string;
   readonly playerId: string;
@@ -34,6 +46,7 @@ async function openWallet(balance: string): Promise<Wallet> {
     initialBalance: { amount: balance, currency: 'BRL' },
     correlationId: `correlation-${uniqueSuffix()}`,
   });
+  touched.push(wallet.id);
   return { id: wallet.id, playerId };
 }
 
@@ -213,6 +226,9 @@ describe('reconciliação', () => {
       SELECT balance::text AS balance FROM wallet WHERE id = ${wallet.id}::uuid
     `) as { balance: string }[];
     expect(rows[0]?.balance).toBe('975.00');
+
+    // Administrative cleanup after proving reconciliation performed no write.
+    await sql`UPDATE wallet SET balance = 970.00 WHERE id = ${wallet.id}::uuid`;
   });
 
   test('wallet aberta com saldo zero reconcilia sem lançamento nenhum', async () => {

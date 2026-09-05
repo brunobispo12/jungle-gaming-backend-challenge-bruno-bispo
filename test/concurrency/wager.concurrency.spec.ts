@@ -1,6 +1,13 @@
 import type { SQL } from 'bun';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
+import {
+  INPUT_QUEUE,
+  drainQueue,
+  queueUrl,
+  sendRaw,
+  sqsClient,
+} from '../integration/support/sqs';
 import { startCluster, type Cluster } from './support/cluster';
 import {
   connectDatabase,
@@ -182,6 +189,10 @@ describe('README §13.3 — wallets distintas em paralelo', () => {
       // The app's lock_timeout is 20 s; a global lock would push this past it.
       expect(Date.now() - startedAt).toBeLessThan(10_000);
       expect(response.body.status).toBe('PROCESSED');
+
+      const state = await inspectWallet(sql, free.id);
+      expect(state.balance.toString()).toBe('90.00');
+      expect(state.reconstructed.equals(state.balance)).toBe(true);
     },
     SCENARIO_TIMEOUT_MS,
   );
@@ -331,35 +342,193 @@ describe('reversões concorrentes sobre a mesma referência', () => {
   );
 });
 
+describe('README §8 — vários consumidores recebendo operações da mesma wallet', () => {
+  test(
+    'mensagens distintas para a mesma wallet são serializadas pelo banco, não pelo broker',
+    async () => {
+      const wallet = await openWallet(cluster, '1000.00', label());
+      const sqs = sqsClient();
+      const inputUrl = await queueUrl(sqs, INPUT_QUEUE);
+      const total = 12;
+      const holder = connectDatabase();
+      const acquired = gate();
+      const release = gate();
+      const holding = holder.begin(async (tx) => {
+        await tx`SELECT id FROM wallet WHERE id = ${wallet.id}::uuid FOR UPDATE`;
+        acquired.open();
+        await release.wait;
+      });
+
+      try {
+        await drainQueue(sqs, inputUrl);
+        await acquired.wait;
+        const before = await sqsProcessedByInstance();
+
+        // One MessageGroupId per message on purpose: grouping by wallet would let
+        // FIFO serialise the work and prove nothing. Here only the wallet lock can
+        // keep the balance correct (INV-053).
+        await Promise.all(
+          Array.from({ length: total }, async (_unused, index) => {
+            const messageId = `same-wallet-${index}-${label()}`;
+            await sendRaw(
+              sqs,
+              inputUrl,
+              JSON.stringify({
+                messageId,
+                type: 'WagerTransactionRequested',
+                occurredAt: new Date().toISOString(),
+                data: {
+                  providerId: 'provider-a',
+                  externalTransactionId: messageId,
+                  idempotencyKey: `provider-a:${messageId}`,
+                  playerId: wallet.playerId,
+                  walletId: wallet.id,
+                  roundId: `round-${messageId}`,
+                  gameId: 'fortune-chimp',
+                  kind: 'BET',
+                  money: { amount: '10.00', currency: 'BRL' },
+                },
+              }),
+              { groupId: messageId, deduplicationId: messageId },
+            );
+          }),
+        );
+
+        // Each WagerConsumerWorker handles one delivery at a time. Two runtime
+        // backends waiting on the held wallet lock prove that distinct workers
+        // participated and actually contended instead of merely consuming 12 rows.
+        const waitingWorkers = await waitForRuntimeLockWaiters(2);
+        expect(waitingWorkers).toBeGreaterThanOrEqual(2);
+
+        release.open();
+        await holding;
+
+        const state = await waitForDebits(wallet.id, total);
+        const after = await sqsProcessedByInstance();
+        const participatingInstances = after.filter(
+          (count, index) => count > (before[index] ?? 0),
+        );
+
+        expect(participatingInstances.length).toBeGreaterThanOrEqual(2);
+        expect(state.debits).toBe(total);
+        expect(state.balance.toString()).toBe('880.00');
+        expect(state.reconstructed.equals(state.balance)).toBe(true);
+      } finally {
+        release.open();
+        await Promise.allSettled([holding]);
+        await holder.end();
+        sqs.destroy();
+      }
+    },
+    SCENARIO_TIMEOUT_MS,
+  );
+});
+
+async function sqsProcessedByInstance(): Promise<number[]> {
+  return Promise.all(
+    cluster.instances.map(async (url) => {
+      const exposition = await (await fetch(`${url}/metrics`)).text();
+      return exposition
+        .split('\n')
+        .filter(
+          (line) => line.startsWith('wager_transactions_total{') && line.includes('source="sqs"'),
+        )
+        .reduce((total, line) => total + Number.parseFloat(line.slice(line.lastIndexOf(' ') + 1)), 0);
+    }),
+  );
+}
+
+async function waitForRuntimeLockWaiters(expected: number): Promise<number> {
+  const deadline = Date.now() + 15_000;
+  let waiting = 0;
+
+  while (Date.now() <= deadline) {
+    const rows = (await sql`
+      SELECT count(DISTINCT pid)::int AS waiting
+      FROM pg_stat_activity
+      WHERE usename = 'wagering_app'
+        AND state = 'active'
+        AND wait_event_type = 'Lock'
+    `) as { waiting: number }[];
+    waiting = rows[0]?.waiting ?? 0;
+    if (waiting >= expected) {
+      return waiting;
+    }
+    await Bun.sleep(50);
+  }
+
+  return waiting;
+}
+
+async function waitForDebits(
+  walletId: string,
+  expected: number,
+): Promise<Awaited<ReturnType<typeof inspectWallet>>> {
+  const deadline = Date.now() + 60_000;
+
+  for (;;) {
+    const state = await inspectWallet(sql, walletId);
+    if (state.debits >= expected || Date.now() > deadline) {
+      return state;
+    }
+    await Bun.sleep(250);
+  }
+}
+
 describe('README §13.8 — reinício com consistência final', () => {
   test(
-    'matar e reiniciar uma instância sob carga não quebra a invariante final',
+    'mata os três processos com requests em voo e recupera após iniciar processos novos',
     async () => {
       const wallet = await openWallet(cluster, '1000.00', label());
 
-      const submissions = inParallel(
-        Array.from({ length: 20 }, (_unused, index) => () =>
-          submitWager(cluster.next(), {
-            externalTransactionId: `restart-${index}-${label()}`,
-            playerId: wallet.playerId,
-            walletId: wallet.id,
-            kind: 'BET',
-            amount: '10.00',
-          }).catch(() => ({ status: 0, body: {} }) as WagerResponse),
+      const restartLabel = label();
+      const requests = Array.from({ length: 20 }, (_unused, index) => ({
+        externalTransactionId: `restart-${index}-${restartLabel}`,
+        playerId: wallet.playerId,
+        walletId: wallet.id,
+        kind: 'BET',
+        amount: '10.00',
+      }));
+      const holder = connectDatabase();
+      const acquired = gate();
+      const release = gate();
+      const holding = holder.begin(async (tx) => {
+        await tx`SELECT id FROM wallet WHERE id = ${wallet.id}::uuid FOR UPDATE`;
+        acquired.open();
+        await release.wait;
+      });
+
+      await acquired.wait;
+      const inFlight = inParallel(
+        requests.map((request, index) => () =>
+          submitWager(cluster.instances[index % cluster.instances.length]!, request),
         ),
       );
+      // Attach the rejection handler before SIGKILL; connection resets are the
+      // expected transport result of killing the serving processes.
+      const interrupted = Promise.allSettled([inFlight]);
 
-      await cluster.stop(1);
-      const responses = await submissions;
-      await cluster.start(1);
+      try {
+        expect(await waitForRuntimeLockWaiters(3)).toBeGreaterThanOrEqual(3);
+        await Promise.all(cluster.instances.map((_url, index) => cluster.stop(index)));
+        await interrupted;
+      } finally {
+        release.open();
+        await holding;
+        await holder.end();
+      }
 
-      const applied = processed(responses);
-      const state = await inspectWallet(sql, wallet.id);
+      await Promise.all(cluster.instances.map((_url, index) => cluster.start(index)));
 
-      // Requests in flight on the killed instance may be lost; what must hold is
-      // that every applied effect left the ledger and the balance agreeing.
-      expect(state.debits).toBe(applied.length);
-      expect(state.reconstructed.equals(state.balance)).toBe(true);
+      const recovered = await inParallel(
+        requests.map((request) => () => submitWager(cluster.next(), request)),
+      );
+      expect(processed(recovered)).toHaveLength(requests.length);
+
+      const recoveredState = await inspectWallet(sql, wallet.id);
+      expect(recoveredState.debits).toBe(20);
+      expect(recoveredState.balance.toString()).toBe('800.00');
+      expect(recoveredState.reconstructed.equals(recoveredState.balance)).toBe(true);
 
       const survivor = await submitWager(cluster.next(), {
         externalTransactionId: `after-restart-${label()}`,
@@ -369,6 +538,23 @@ describe('README §13.8 — reinício com consistência final', () => {
         amount: '10.00',
       });
       expect(survivor.body.status).toBe('PROCESSED');
+
+      const finalState = await inspectWallet(sql, wallet.id);
+      expect(finalState.debits).toBe(21);
+      expect(finalState.balance.toString()).toBe('790.00');
+      expect(finalState.reconstructed.equals(finalState.balance)).toBe(true);
+
+      const reconciliation = await fetch(`${cluster.next()}/wallets/${wallet.id}/reconciliation`, {
+        method: 'POST',
+      });
+      expect(reconciliation.status).toBe(200);
+      expect(await reconciliation.json()).toMatchObject({
+        walletId: wallet.id,
+        storedBalance: { amount: '790.00', currency: 'BRL' },
+        calculatedBalance: { amount: '790.00', currency: 'BRL' },
+        consistent: true,
+        checkedEntries: 22,
+      });
     },
     SCENARIO_TIMEOUT_MS,
   );

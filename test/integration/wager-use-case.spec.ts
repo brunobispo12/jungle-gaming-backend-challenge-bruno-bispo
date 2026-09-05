@@ -1,11 +1,16 @@
 import type { SQL } from 'bun';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 
 import { ApplicationError, ErrorCode } from '@/application/errors';
 import type { SubmitWagerCommand } from '@/application/use-cases/submit-wager-transaction';
 import { FailureCode } from '@/domain/failure-code';
 import { WagerTransactionKind, WagerTransactionStatus } from '@/domain/wager-transaction';
-import { MIGRATOR_URL, connect, uniqueSuffix } from './support/database';
+import {
+  MIGRATOR_URL,
+  connect,
+  expectWalletsMatchLedger,
+  uniqueSuffix,
+} from './support/database';
 import { bootUseCases, type UseCases } from './support/use-cases';
 
 let app: UseCases;
@@ -21,6 +26,14 @@ afterAll(async () => {
   await sql.end();
 });
 
+const touched: string[] = [];
+
+// README §13: a test that moved a wallet closes by proving the ledger still
+// reconstructs its balance.
+afterEach(async () => {
+  await expectWalletsMatchLedger(sql, touched.splice(0));
+});
+
 async function openWallet(balance: string, currency = 'BRL'): Promise<{ id: string; playerId: string }> {
   const playerId = `player-${uniqueSuffix()}`;
   const wallet = await app.createWallet.execute({
@@ -28,6 +41,7 @@ async function openWallet(balance: string, currency = 'BRL'): Promise<{ id: stri
     initialBalance: { amount: balance, currency },
     correlationId: `correlation-${uniqueSuffix()}`,
   });
+  touched.push(wallet.id);
   return { id: wallet.id, playerId };
 }
 

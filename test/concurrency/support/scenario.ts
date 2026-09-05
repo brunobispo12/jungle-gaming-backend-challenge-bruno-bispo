@@ -112,8 +112,10 @@ export async function inspectWallet(sql: SQL, walletId: string): Promise<WalletS
     SELECT
       w.balance::text AS balance,
       w.currency AS currency,
-      COALESCE(SUM(l.amount) FILTER (WHERE l.direction = 'CREDIT'), 0)::text AS credited,
-      COALESCE(SUM(l.amount) FILTER (WHERE l.direction = 'DEBIT'), 0)::text AS debited,
+      COALESCE(
+        SUM(CASE WHEN l.direction = 'CREDIT' THEN l.amount ELSE -l.amount END),
+        0
+      )::text AS reconstructed,
       COUNT(*) FILTER (WHERE l.direction = 'DEBIT')::int AS debits,
       COUNT(*) FILTER (WHERE l.direction = 'CREDIT')::int AS credits
     FROM wallet w
@@ -123,8 +125,7 @@ export async function inspectWallet(sql: SQL, walletId: string): Promise<WalletS
   `) as {
     balance: string;
     currency: string;
-    credited: string;
-    debited: string;
+    reconstructed: string;
     debits: number;
     credits: number;
   }[];
@@ -134,11 +135,14 @@ export async function inspectWallet(sql: SQL, walletId: string): Promise<WalletS
     throw new Error(`wallet ${walletId} not found`);
   }
 
-  const money = (amount: string): Money => Money.from({ amount, currency: row.currency });
+  const money = (amount: string): Money =>
+    amount.startsWith('-')
+      ? Money.from({ amount: amount.slice(1), currency: row.currency }).negate()
+      : Money.from({ amount, currency: row.currency });
 
   return {
     balance: money(row.balance),
-    reconstructed: money(row.credited).subtract(money(row.debited)),
+    reconstructed: money(row.reconstructed),
     debits: row.debits,
     credits: row.credits,
   };

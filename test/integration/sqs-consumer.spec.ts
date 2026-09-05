@@ -2,6 +2,7 @@ import type { SQSClient } from '@aws-sdk/client-sqs';
 import type { SQL } from 'bun';
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -23,7 +24,12 @@ import {
 } from '@/infrastructure/observability/json-logger';
 import { CONSUMER_NAME, parseWagerMessage } from '@/interface/sqs/envelope';
 import { WagerConsumerWorker } from '@/interface/sqs/wager-consumer.worker';
-import { MIGRATOR_URL, connect, uniqueSuffix } from './support/database';
+import {
+  MIGRATOR_URL,
+  connect,
+  expectWalletsMatchLedger,
+  uniqueSuffix,
+} from './support/database';
 import {
   DLQ_QUEUE,
   INPUT_QUEUE,
@@ -119,6 +125,14 @@ beforeEach(async () => {
   await drainQueue(sqs, dlqUrl);
 }, SQS_TEST_TIMEOUT_MS);
 
+const touched: string[] = [];
+
+// README §13: a test that moved a wallet closes by proving the ledger still
+// reconstructs its balance.
+afterEach(async () => {
+  await expectWalletsMatchLedger(sql, touched.splice(0));
+});
+
 async function openWallet(balance: string): Promise<{ id: string; playerId: string }> {
   const playerId = `player-${uniqueSuffix()}`;
   const wallet = await app.createWallet.execute({
@@ -126,6 +140,7 @@ async function openWallet(balance: string): Promise<{ id: string; playerId: stri
     initialBalance: { amount: balance, currency: 'BRL' },
     correlationId: `correlation-${uniqueSuffix()}`,
   });
+  touched.push(wallet.id);
   return { id: wallet.id, playerId };
 }
 
@@ -185,7 +200,8 @@ describe('consumidor SQS contra fila real', () => {
         level: 'info',
         message: 'message processed',
         fields: expect.objectContaining({
-          messageId: expect.any(String),
+          messageId,
+          brokerMessageId: expect.any(String),
           correlationId: expect.any(String),
           transactionId: expect.any(String),
           walletId: wallet.id,
@@ -227,6 +243,42 @@ describe('consumidor SQS contra fila real', () => {
       expect.objectContaining({ level: 'error', message: 'message rejected as permanent' }),
     );
   });
+
+  test('UUID, limite textual e dinheiro invalidos vao para DLQ sem retry transitorio', async () => {
+    const wallet = await openWallet('1000.00');
+    const cases: ReadonlyArray<Record<string, unknown>> = [
+      { walletId: 'not-a-uuid' },
+      { playerId: 'p'.repeat(65) },
+      { money: { amount: 'NaN', currency: 'BRL' } },
+      { money: { amount: '1.001', currency: 'BRL' } },
+    ];
+
+    for (const [index, overrides] of cases.entries()) {
+      logger.lines.length = 0;
+      const messageId = `msg-invalid-${index}-${uniqueSuffix()}`;
+      const body = envelopeFor(wallet, messageId, overrides);
+      await sendRaw(sqs, inputUrl, body, {
+        groupId: `invalid-${index}-${wallet.id}`,
+        deduplicationId: messageId,
+      });
+
+      expect(await worker.pollOnce()).toBe(1);
+      const [dead] = await receiveMessages(sqs, dlqUrl, 1);
+      expect(dead?.Body).toBe(body);
+      expect(logger.lines).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          message: 'message rejected as permanent',
+          fields: expect.objectContaining({ messageId, brokerMessageId: expect.any(String) }),
+        }),
+      );
+      expect(logger.lines.some((line) => line.level === 'warn')).toBe(false);
+    }
+
+    expect(await receiveMessages(sqs, inputUrl, 1)).toEqual([]);
+    expect(await balanceOf(wallet.id)).toBe('1000.00');
+    expect(await ledgerCount(wallet.id)).toBe(1);
+  }, 30_000);
 
   test('conflito de idempotência de negócio vai para a DLQ sem alterar saldo', async () => {
     const wallet = await openWallet('1000.00');
@@ -309,4 +361,91 @@ describe('consumidor SQS contra fila real', () => {
     await Bun.sleep(6_000);
     expect(await receiveMessages(sqs, inputUrl, 3)).toHaveLength(1);
   }, 30_000);
+
+  // README §13 ordering item 7, end to end through the queue: the reversal is
+  // consumed before the transaction it reverses even exists.
+  test('REFUND entregue antes da BET fica pendente e é aplicado quando a referência chega', async () => {
+    const wallet = await openWallet('1000.00');
+    const round = `round-${uniqueSuffix()}`;
+    const betExternalId = `bet-${uniqueSuffix()}`;
+
+    const refundMessageId = `msg-${uniqueSuffix()}`;
+    await sendRaw(
+      sqs,
+      inputUrl,
+      envelopeFor(wallet, refundMessageId, {
+        externalTransactionId: `refund-${uniqueSuffix()}`,
+        idempotencyKey: `provider-a:refund-${refundMessageId}`,
+        roundId: round,
+        kind: 'REFUND',
+        referenceExternalTransactionId: betExternalId,
+      }),
+      { groupId: wallet.id, deduplicationId: refundMessageId },
+    );
+
+    expect(await worker.pollOnce()).toBe(1);
+    expect(await balanceOf(wallet.id)).toBe('1000.00');
+    expect(await ledgerCount(wallet.id)).toBe(1);
+    expect(await statusOf(betExternalId, 'REFUND')).toBe('PENDING_REFERENCE');
+
+    const betMessageId = `msg-${uniqueSuffix()}`;
+    await sendRaw(
+      sqs,
+      inputUrl,
+      envelopeFor(wallet, betMessageId, {
+        externalTransactionId: betExternalId,
+        idempotencyKey: `provider-a:${betExternalId}`,
+        roundId: round,
+      }),
+      { groupId: wallet.id, deduplicationId: betMessageId },
+    );
+
+    expect(await worker.pollOnce()).toBe(1);
+    expect(await balanceOf(wallet.id)).toBe('975.00');
+
+    // The worker takes the oldest due pending in the table; park everything that
+    // other suites left behind so this tick can only pick the one under test.
+    await sql`
+      UPDATE wager_transaction SET next_attempt_at = TIMESTAMPTZ '2999-01-01'
+      WHERE status = 'PENDING_REFERENCE'
+        AND reference_external_transaction_id IS DISTINCT FROM ${betExternalId}
+    `;
+
+    app.clock.advance(10_000);
+    const settled = await app.resolvePendingReference.run();
+
+    expect(settled).toMatchObject({ kind: 'settled', status: 'PROCESSED' });
+    expect(await balanceOf(wallet.id)).toBe('1000.00');
+    expect(await ledgerCount(wallet.id)).toBe(3);
+    expect(await processedInboxCount([refundMessageId, betMessageId])).toBe(2);
+  }, 30_000);
 });
+
+async function statusOf(referenceExternalId: string, kind: string): Promise<string> {
+  const rows = (await sql`
+    SELECT status::text AS status FROM wager_transaction
+    WHERE reference_external_transaction_id = ${referenceExternalId} AND kind::text = ${kind}
+  `) as { status: string }[];
+
+  const row = rows[0];
+  if (row === undefined) {
+    throw new Error(`nenhuma ${kind} referenciando ${referenceExternalId}`);
+  }
+  return row.status;
+}
+
+async function processedInboxCount(messageIds: readonly string[]): Promise<number> {
+  let processed = 0;
+
+  for (const messageId of messageIds) {
+    const rows = (await sql`
+      SELECT count(*)::int AS total FROM inbox_message
+      WHERE consumer_name = ${CONSUMER_NAME}
+        AND message_id = ${messageId}
+        AND processed_at IS NOT NULL
+    `) as { total: number }[];
+    processed += rows[0]?.total ?? 0;
+  }
+
+  return processed;
+}

@@ -38,6 +38,19 @@ function claimAt(publisherId: string, now = new Date()): Promise<unknown> {
   return outbox.claim(publisherId, now, new Date(now.getTime() + LEASE_MS));
 }
 
+interface Gate {
+  readonly wait: Promise<void>;
+  open(): void;
+}
+
+function gate(): Gate {
+  let open!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { wait, open };
+}
+
 describe('MikroOutboxClaimRepository.claim', () => {
   test('reclama a mensagem elegível e devolve o envelope persistido', async () => {
     const seeded = await seedOutboxMessage(sql, { attempts: 2 });
@@ -97,6 +110,38 @@ describe('MikroOutboxClaimRepository.claim', () => {
 
     expect(claim).toMatchObject({ id: seeded.id });
     expect((await readOutboxRow(sql, seeded.id)).claimed_by).toBe('instance-1');
+  });
+
+  // A barrier instead of scheduling luck: the row is provably locked before the
+  // second publisher looks at it, so SKIP LOCKED is what makes it move on.
+  test('a linha travada por outro publisher é pulada, não esperada', async () => {
+    const held = await seedOutboxMessage(sql, { occurredAt: new Date(Date.now() - 60_000) });
+    const next = await seedOutboxMessage(sql, { occurredAt: new Date() });
+
+    const holder = connect(MIGRATOR_URL);
+    const acquired = gate();
+    const release = gate();
+
+    const holding = holder.begin(async (tx) => {
+      await tx`SELECT id FROM outbox_message WHERE id = ${held.id}::uuid FOR UPDATE`;
+      acquired.open();
+      await release.wait;
+    });
+
+    try {
+      await acquired.wait;
+
+      const startedAt = Date.now();
+      const claim = await claimAt('instance-2');
+
+      // The held row is the older one, so ordering alone would have picked it.
+      expect(claim).toMatchObject({ id: next.id });
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+    } finally {
+      release.open();
+      await holding;
+      await holder.close();
+    }
   });
 
   test('publishers concorrentes não reclamam a mesma mensagem', async () => {
