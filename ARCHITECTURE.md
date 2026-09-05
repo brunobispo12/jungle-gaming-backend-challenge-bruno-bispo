@@ -444,6 +444,8 @@ O contrato distingue erro de protocolo de resultado de negócio:
 | Resultado | HTTP | Persistência |
 |---|---:|---|
 | Payload/header inválido | 400 | nada |
+| Corpo acima do limite do parser | 413 | nada |
+| Charset ou encoding não suportado | 415 | nada |
 | Idempotency-Key com payload divergente | 409 | nada novo |
 | externalTransactionId reutilizado com outra key | 409 | nada novo |
 | Primeira operação PROCESSED | 201 | Wager, efeito, ledger e Outbox |

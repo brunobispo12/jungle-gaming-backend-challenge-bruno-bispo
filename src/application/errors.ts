@@ -1,5 +1,7 @@
 export const ErrorCode = {
   InvalidPayload: 'INVALID_PAYLOAD',
+  PayloadTooLarge: 'PAYLOAD_TOO_LARGE',
+  UnsupportedMediaType: 'UNSUPPORTED_MEDIA_TYPE',
   MissingIdempotencyKey: 'MISSING_IDEMPOTENCY_KEY',
   IdempotencyKeyConflict: 'IDEMPOTENCY_KEY_CONFLICT',
   ExternalTransactionIdReused: 'EXTERNAL_TRANSACTION_ID_REUSED',

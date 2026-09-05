@@ -251,6 +251,51 @@ describe('API HTTP contra PostgreSQL real', () => {
     }
   });
 
+  test.each([['BET'], ['LOSS']])(
+    '%s com referenceExternalTransactionId é recusado como payload inválido, não como erro interno',
+    async (kind) => {
+      const wallet = await createWallet('100.00');
+      const response = await fetch(`${baseUrl}/wagering/transactions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': `provider-http:reference-${suffix()}`,
+        },
+        body: JSON.stringify(
+          wagerBody(wallet, { kind, referenceExternalTransactionId: `transaction-${suffix()}` }),
+        ),
+      });
+
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as ErrorResponse).error.code).toBe('INVALID_PAYLOAD');
+    },
+  );
+
+  test('corpo acima do limite responde 413 com o envelope de erro', async () => {
+    const response = await fetch(`${baseUrl}/wallets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        playerId: 'p'.repeat(200_000),
+        initialBalance: { amount: '1.00', currency: 'BRL' },
+      }),
+    });
+
+    expect(response.status).toBe(413);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe('PAYLOAD_TOO_LARGE');
+  });
+
+  test('charset não suportado responde 415 com o envelope de erro', async () => {
+    const response = await fetch(`${baseUrl}/wallets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json; charset=utf-32' },
+      body: JSON.stringify({ playerId: 'p', initialBalance: { amount: '1.00', currency: 'BRL' } }),
+    });
+
+    expect(response.status).toBe(415);
+    expect(((await response.json()) as ErrorResponse).error.code).toBe('UNSUPPORTED_MEDIA_TYPE');
+  });
+
   test('wallet duplicada responde 409', async () => {
     const playerId = `player-${suffix()}`;
     const wallet = await createWallet('1000.00', playerId);

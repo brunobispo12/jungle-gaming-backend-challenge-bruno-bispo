@@ -101,6 +101,12 @@ export interface SubmitWagerBody {
   readonly referenceExternalTransactionId: string | undefined;
 }
 
+const REFERENCE_BEARING_KINDS: readonly WagerTransactionKind[] = [
+  WagerTransactionKind.Refund,
+  WagerTransactionKind.Rollback,
+  WagerTransactionKind.Win,
+];
+
 const SUBMITTABLE_KINDS = [
   WagerTransactionKind.Bet,
   WagerTransactionKind.Win,
@@ -148,6 +154,16 @@ export function parseSubmitWager(body: unknown): SubmitWagerBody {
       ErrorCode.ReferenceRequired,
       `${parsed.kind} requires referenceExternalTransactionId`,
     );
+  }
+
+  // Mirrors wager_reference_external_by_kind_ck: without this the row is refused
+  // by the CHECK during the identity reservation, and a payload defect surfaces
+  // as an infrastructure error instead of a rejected request (README §9, §10).
+  if (
+    parsed.referenceExternalTransactionId !== undefined &&
+    !REFERENCE_BEARING_KINDS.includes(parsed.kind)
+  ) {
+    invalid(`${parsed.kind} must not carry referenceExternalTransactionId`);
   }
 
   return parsed;

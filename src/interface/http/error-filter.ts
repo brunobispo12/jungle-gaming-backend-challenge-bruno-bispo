@@ -19,6 +19,8 @@ const RETRY_AFTER_SECONDS = '1';
 
 const STATUS: Readonly<Record<ErrorCode, number>> = {
   [ErrorCode.InvalidPayload]: HttpStatus.BAD_REQUEST,
+  [ErrorCode.PayloadTooLarge]: HttpStatus.PAYLOAD_TOO_LARGE,
+  [ErrorCode.UnsupportedMediaType]: HttpStatus.UNSUPPORTED_MEDIA_TYPE,
   [ErrorCode.MissingIdempotencyKey]: HttpStatus.BAD_REQUEST,
   [ErrorCode.AmountNotPositive]: HttpStatus.BAD_REQUEST,
   [ErrorCode.ReferenceRequired]: HttpStatus.BAD_REQUEST,
@@ -76,6 +78,34 @@ interface Described {
   readonly details?: Readonly<Record<string, unknown>> | undefined;
 }
 
+const BODY_PARSER_FAILURES: Readonly<Record<string, { code: ErrorCode; message: string }>> = {
+  'entity.too.large': { code: ErrorCode.PayloadTooLarge, message: 'request body is too large' },
+  'entity.parse.failed': { code: ErrorCode.InvalidPayload, message: 'invalid request payload' },
+  'charset.unsupported': {
+    code: ErrorCode.UnsupportedMediaType,
+    message: 'unsupported charset; send the body as application/json with utf-8',
+  },
+  'encoding.unsupported': {
+    code: ErrorCode.UnsupportedMediaType,
+    message: 'unsupported content encoding',
+  },
+  'request.size.invalid': { code: ErrorCode.InvalidPayload, message: 'invalid content length' },
+  'request.aborted': { code: ErrorCode.InvalidPayload, message: 'the request was aborted' },
+  'parameters.too.many': { code: ErrorCode.InvalidPayload, message: 'too many parameters' },
+};
+
+function bodyParserFailure(exception: unknown): Described | undefined {
+  if (typeof exception !== 'object' || exception === null) {
+    return undefined;
+  }
+  const type = (exception as { type?: unknown }).type;
+  const failure = typeof type === 'string' ? BODY_PARSER_FAILURES[type] : undefined;
+  if (failure === undefined) {
+    return undefined;
+  }
+  return { status: STATUS[failure.code], code: failure.code, message: failure.message };
+}
+
 function describe(exception: unknown): Described {
   if (exception instanceof ApplicationError) {
     return {
@@ -92,6 +122,14 @@ function describe(exception: unknown): Described {
       code: ErrorCode.InvalidPayload,
       message: exception.message,
     };
+  }
+
+  // body-parser rejects before any handler runs and its errors carry no HTTP
+  // status Nest understands, so without this they would surface as 500 and tell
+  // the provider to retry a payload that can never be accepted (README §9).
+  const parsed = bodyParserFailure(exception);
+  if (parsed) {
+    return parsed;
   }
 
   if (exception instanceof HttpException) {

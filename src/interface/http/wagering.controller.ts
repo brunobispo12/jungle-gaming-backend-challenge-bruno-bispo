@@ -49,6 +49,8 @@ function httpStatusFor(result: SubmitWagerResult): number {
       return HttpStatus.UNPROCESSABLE_ENTITY;
     case WagerTransactionStatus.PendingReference:
       return HttpStatus.ACCEPTED;
+    // FAILED is a recorded permanent infrastructure error, so it answers 500 and
+    // never 503: resending the same key would produce the same result.
     default:
       return HttpStatus.INTERNAL_SERVER_ERROR;
   }

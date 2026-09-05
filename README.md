@@ -48,6 +48,14 @@ O que existe e roda:
   contra PostgreSQL e LocalStack reais, com os casos de uso rodando sob a role de runtime
   `wagering_app`, não sob a credencial de migration.
 
+Uma interpretação vale destaque aqui, e não só no `ARCHITECTURE.md`: a regra 4 do README §7
+diz que uma referência não pode ser revertida duas vezes **pelo mesmo tipo de operação**, e é
+isso que o banco garante — índice único parcial em `(reference_transaction_id, kind)` para
+`PROCESSED`. A consequência é que `BET → REFUND(BET) → ROLLBACK(BET)` é aceito e credita duas
+vezes. Optei pela leitura literal do enunciado em vez de proibir a segunda reversão de tipo
+diferente, que recusaria um `ROLLBACK` legítimo de um `REFUND` errado. O trade-off e a
+constraint alternativa estão em [`ARCHITECTURE.md` §3.5](ARCHITECTURE.md).
+
 O diferencial de carga está disponível separadamente em `bun run test:load`, com k6,
 cinco perfis e validação financeira no PostgreSQL após cada cenário.
 Tracing com OpenTelemetry (README §12) continua não implementado. Autenticação funcional
