@@ -98,7 +98,9 @@ Transições permitidas:
 
 PROCESSED, REJECTED e FAILED são terminais. processedAt existe exatamente nesses estados. Um trigger rejeita UPDATE ou DELETE de uma linha que já estava terminal.
 
-FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED. Não há evento de integração para FAILED.
+FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED — a classificação reconhece tanto o SQLSTATE quanto a perda de socket que chega sem SQLSTATE algum, porque tratar um blip de rede como determinístico terminalizaria uma pendência legítima.
+
+FAILED não tem evento próprio: publica `WagerTransactionRejected` com `failureCode = INFRASTRUCTURE_FAILURE`, que é o que distingue esse caso de uma recusa por regra de negócio no mesmo tipo de evento. A alternativa seria um quinto tipo de evento fora dos quatro mínimos do README §11, e o `failureCode` já resolve para o consumidor.
 
 ### 3.4 Efeito financeiro por kind
 

@@ -18,6 +18,31 @@ const LOCK_CONFLICT_REASONS: Readonly<Record<string, 'lock_timeout' | 'deadlock'
 
 const CONNECTION_EXCEPTION_CLASS = '08';
 
+// A socket that dies mid query never reaches PostgreSQL's error protocol, so it
+// arrives with a libuv code or with nothing but a message. Classifying it as
+// deterministic would turn a blip into a terminal FAILED transaction (README §10).
+const TRANSIENT_SOCKET_CODES = new Set([
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'EPIPE',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+]);
+
+const TRANSIENT_MESSAGES = [
+  /connection terminated/i,
+  /connection ended/i,
+  /server closed the connection/i,
+  /socket hang up/i,
+  /timeout exceeded when trying to connect/i,
+  /pool is draining/i,
+];
+
 function sqlStateOf(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
@@ -58,13 +83,39 @@ function findInCauseChain<T>(
 }
 
 export function isTransientDatabaseFailure(error: unknown): boolean {
-  return (
+  const bySqlState =
     findInCauseChain(error, (state) =>
       TRANSIENT_SQLSTATES.has(state) || state.startsWith(CONNECTION_EXCEPTION_CLASS)
         ? true
         : undefined,
-    ) ?? false
-  );
+    ) ?? false;
+
+  return bySqlState || isTransientConnectionLoss(error);
+}
+
+function isTransientConnectionLoss(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+
+  while (current !== undefined && current !== null && !seen.has(current)) {
+    seen.add(current);
+
+    const candidate = current as { code?: unknown; message?: unknown };
+    if (typeof candidate.code === 'string' && TRANSIENT_SOCKET_CODES.has(candidate.code)) {
+      return true;
+    }
+    if (
+      typeof candidate.message === 'string' &&
+      TRANSIENT_MESSAGES.some((pattern) => pattern.test(candidate.message as string))
+    ) {
+      return true;
+    }
+
+    const link = current as { previous?: unknown; cause?: unknown };
+    current = link.previous ?? link.cause;
+  }
+
+  return false;
 }
 
 // Only a refusal PostgreSQL classified is a lock conflict; a wait that ended in

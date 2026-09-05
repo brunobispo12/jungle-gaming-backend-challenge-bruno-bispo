@@ -43,6 +43,32 @@ describe('classificação de falha transitória', () => {
     expect(isTransientDatabaseFailure(Object.assign(new Error('x'), { errno: '40P01' }))).toBe(true);
   });
 
+  test.each([
+    ['conexão resetada pelo servidor', 'ECONNRESET'],
+    ['servidor recusando conexão', 'ECONNREFUSED'],
+    ['socket estourou o tempo', 'ETIMEDOUT'],
+    ['dns temporariamente indisponível', 'EAI_AGAIN'],
+  ])('%s é transitório mesmo sem SQLSTATE', (_label, socketCode) => {
+    const previous = Object.assign(new Error('socket failure'), { code: socketCode });
+    expect(isTransientDatabaseFailure(Object.assign(new Error('wrapped'), { previous }))).toBe(true);
+  });
+
+  test.each([
+    ['Connection terminated unexpectedly'],
+    ['socket hang up'],
+    ['timeout exceeded when trying to connect'],
+  ])('perda de conexão reconhecida pela mensagem: %s', (message) => {
+    expect(isTransientDatabaseFailure(new Error(message))).toBe(true);
+  });
+
+  test('perda de conexão sem SQLSTATE não vira falha determinística', () => {
+    const previous = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    const wrapped = Object.assign(new Error('query failed'), { previous });
+
+    expect(isTransientDatabaseFailure(wrapped)).toBe(true);
+    expect(lockConflictReason(wrapped)).toBeUndefined();
+  });
+
   test('erro comum e ciclo na cadeia de causas não travam a classificação', () => {
     expect(isTransientDatabaseFailure(new Error('boom'))).toBe(false);
     expect(isTransientDatabaseFailure(undefined)).toBe(false);
