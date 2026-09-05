@@ -18,13 +18,8 @@ interface OutboxStateRow {
   readonly oldest_age_seconds: string;
 }
 
-const OUTBOX_CACHE_MS = 250;
-
 export class PostgresSqsOperationalMetrics implements OperationalMetricsSource {
   private readonly urls: QueueUrlCache;
-  private outboxCache:
-    | { readonly expiresAt: number; readonly value: Promise<OutboxState> }
-    | undefined;
 
   constructor(
     private readonly orm: MikroORM,
@@ -32,22 +27,6 @@ export class PostgresSqsOperationalMetrics implements OperationalMetricsSource {
     private readonly dlqName: string,
   ) {
     this.urls = new QueueUrlCache(sqs);
-  }
-
-  outboxState(): Promise<OutboxState> {
-    const now = Date.now();
-    if (this.outboxCache !== undefined && this.outboxCache.expiresAt > now) {
-      return this.outboxCache.value;
-    }
-
-    const value = this.readOutboxState();
-    this.outboxCache = { expiresAt: now + OUTBOX_CACHE_MS, value };
-    value.catch(() => {
-      if (this.outboxCache?.value === value) {
-        this.outboxCache = undefined;
-      }
-    });
-    return value;
   }
 
   async dlqVisibleMessages(): Promise<number> {
@@ -60,7 +39,7 @@ export class PostgresSqsOperationalMetrics implements OperationalMetricsSource {
     return nonNegativeNumber(result.Attributes?.['ApproximateNumberOfMessages']);
   }
 
-  private async readOutboxState(): Promise<OutboxState> {
+  async outboxState(): Promise<OutboxState> {
     const [row] = await this.orm.em.fork().getConnection().execute<OutboxStateRow[]>(
       `SELECT
          COUNT(*)::text AS pending,

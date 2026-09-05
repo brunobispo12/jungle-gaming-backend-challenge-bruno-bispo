@@ -1,0 +1,10 @@
+node_modules
+artifacts
+docs
+test
+.git
+.claude
+*.md
+!README.md
+Dockerfile
+docker-compose*.yml

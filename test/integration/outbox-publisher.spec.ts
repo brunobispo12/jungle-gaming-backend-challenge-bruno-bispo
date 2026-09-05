@@ -10,6 +10,7 @@ import { runtimeOrmConfig } from '@/infrastructure/persistence/orm.config';
 import { MikroOutboxClaimRepository } from '@/infrastructure/persistence/outbox-claim.repository';
 import { SCHEMAS } from '@/infrastructure/persistence/rows';
 import { APP_URL, connect, MIGRATOR_URL, readOutboxRow, seedOutboxMessage } from './support/database';
+import { silentLogger } from './support/logging';
 import { drainQueue, EVENTS_QUEUE, queueUrl, receiveMessages, sqsClient } from './support/sqs';
 
 const LEASE_MS = 30_000;
@@ -45,7 +46,7 @@ beforeAll(async () => {
   sqs = sqsClient();
   eventsUrl = await queueUrl(sqs, EVENTS_QUEUE);
   outbox = new MikroOutboxClaimRepository(orm);
-  publisher = new SqsEventPublisher(sqs, EVENTS_QUEUE, SEND_TIMEOUT_MS);
+  publisher = new SqsEventPublisher(sqs, EVENTS_QUEUE, SEND_TIMEOUT_MS, silentLogger());
 }, SQS_TEST_TIMEOUT_MS);
 
 afterAll(async () => {
@@ -76,7 +77,7 @@ describe('SqsEventPublisher', () => {
   });
 
   test('a fila inexistente falha o envio em vez de descartar o evento', async () => {
-    const broken = new SqsEventPublisher(sqs, 'missing-queue.fifo', SEND_TIMEOUT_MS);
+    const broken = new SqsEventPublisher(sqs, 'missing-queue.fifo', SEND_TIMEOUT_MS, silentLogger());
 
     await expect(
       broken.publish({
@@ -146,7 +147,7 @@ describe('PublishOutboxMessageUseCase sobre PostgreSQL e SQS reais', () => {
 
   test('falha no envio conta a tentativa e mantém a mensagem elegível', async () => {
     const seeded = await seedOutboxMessage(sql);
-    const broken = new SqsEventPublisher(sqs, 'missing-queue.fifo', SEND_TIMEOUT_MS);
+    const broken = new SqsEventPublisher(sqs, 'missing-queue.fifo', SEND_TIMEOUT_MS, silentLogger());
 
     expect(await useCaseOf('instance-1', broken).run()).toBe('retry-scheduled');
 
@@ -183,9 +184,14 @@ describe('PublishOutboxMessageUseCase sobre PostgreSQL e SQS reais', () => {
 
     const both = Promise.all([drain('instance-1'), drain('instance-2')]);
     barrier.open();
-    const outcomes = (await both).flat();
+    const [first, second] = await both;
+    const outcomes = [...first, ...second];
 
     expect(outcomes.filter((outcome) => outcome === 'published')).toHaveLength(pending);
+    // Without this the same numbers would pass if one publisher had done all the
+    // work and the other had only ever seen an empty outbox.
+    expect(first.filter((outcome) => outcome === 'published').length).toBeGreaterThan(0);
+    expect(second.filter((outcome) => outcome === 'published').length).toBeGreaterThan(0);
 
     const rows = (await sql`
       SELECT

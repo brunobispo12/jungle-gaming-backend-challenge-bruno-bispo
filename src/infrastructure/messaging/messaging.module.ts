@@ -23,16 +23,22 @@ const ERROR_DELAY_MS = 2_000;
   providers: [
     {
       provide: PublishOutboxMessageUseCase,
-      inject: [ORM, SQS_CLIENT, APP_ENV, METRICS],
+      inject: [ORM, SQS_CLIENT, APP_ENV, METRICS, LOGGER],
       useFactory: (
         orm: MikroORM,
         sqs: SQSClient,
         env: AppEnv,
         metrics: MetricsPort,
+        logger: JsonLogger,
       ): PublishOutboxMessageUseCase =>
         new PublishOutboxMessageUseCase(
           new MikroOutboxClaimRepository(orm),
-          new SqsEventPublisher(sqs, env.queues.events, SEND_TIMEOUT_MS),
+          new SqsEventPublisher(
+            sqs,
+            env.queues.events,
+            SEND_TIMEOUT_MS,
+            logger.child({ worker: 'outbox-publisher' }),
+          ),
           new SystemClock(),
           { publisherId: env.instanceId, leaseMs: LEASE_MS },
           Math.random,

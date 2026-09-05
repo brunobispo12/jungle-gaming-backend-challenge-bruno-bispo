@@ -39,6 +39,7 @@ import {
   sendRaw,
   sqsClient,
 } from './support/sqs';
+import { silentLogger } from './support/logging';
 import { bootUseCases, type UseCases } from './support/use-cases';
 
 const CRASH_TIMEOUT_MS = 60_000;
@@ -82,8 +83,8 @@ beforeAll(async () => {
     dlqQueue: DLQ_QUEUE,
     batchSize: 10,
     waitTimeSeconds: 1,
-    inFlightGraceMs: 1_000,
     visibilityTimeoutSeconds: 60,
+    inFlightGraceMs: 1_000,
     shutdownWindowMs: 2_000,
   });
 }, CRASH_TIMEOUT_MS);
@@ -307,7 +308,7 @@ describe('TST-028 recuperação depois do reinício', () => {
 
     const publisher = new PublishOutboxMessageUseCase(
       new MikroOutboxClaimRepository(app.orm),
-      new SqsEventPublisher(sqs, EVENTS_QUEUE, SEND_TIMEOUT_MS),
+      new SqsEventPublisher(sqs, EVENTS_QUEUE, SEND_TIMEOUT_MS, silentLogger()),
       new SystemClock(),
       { publisherId: 'instance-after-restart', leaseMs: LEASE_MS },
       Math.random,

@@ -44,7 +44,7 @@ O que existe e roda:
 - a superfície operacional — `/health/live`, `/health/ready` e `/metrics` — responde em
   **qualquer papel**, inclusive num processo sem `api`, porque métricas de um consumer ou
   de um publisher precisam ser raspáveis; sem o papel `api` a API de negócio responde 404;
-- 178 testes de unidade, 144 de integração e 11 de concorrência com três processos reais
+- 186 testes de unidade, 149 de integração e 11 de concorrência com três processos reais
   contra PostgreSQL e LocalStack reais, com os casos de uso rodando sob a role de runtime
   `wagering_app`, não sob a credencial de migration.
 
@@ -245,7 +245,7 @@ apontá-las para a infraestrutura desejada.
 | Variável | Papel |
 |---|---|
 | `DATABASE_URL` | conexão da role de runtime, sem DDL e sem `DELETE` em tabela financeira |
-| `DATABASE_MIGRATION_URL` | conexão da credencial de migration, a única que altera schema |
+| `DATABASE_MIGRATION_URL` | conexão da credencial de migration, a única que altera schema; é a única variável que os comandos `migrate:*` exigem, com fallback para `DATABASE_URL` |
 | `AWS_ENDPOINT_URL` | endpoint do SQS (LocalStack) |
 | `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | credenciais do cliente SQS |
 | `SQS_INPUT_QUEUE`, `SQS_DLQ_QUEUE`, `SQS_EVENTS_QUEUE` | nomes das filas |

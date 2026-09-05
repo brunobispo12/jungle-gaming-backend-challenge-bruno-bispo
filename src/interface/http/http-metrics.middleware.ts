@@ -1,24 +1,16 @@
-import {
-  type CallHandler,
-  type ExecutionContext,
-  Inject,
-  Injectable,
-  type NestInterceptor,
-} from '@nestjs/common';
-import type { Request, Response } from 'express';
-import type { Observable } from 'rxjs';
+import { Inject, Injectable, type NestMiddleware } from '@nestjs/common';
+import type { NextFunction, Request, Response } from 'express';
 
 import type { MetricsPort } from '@/application/ports';
 import { METRICS } from '@/infrastructure/tokens';
 
+// Middleware and not an interceptor: guards and the exception filter answer
+// before any interceptor runs, and those responses count too (README §12).
 @Injectable()
-export class HttpMetricsInterceptor implements NestInterceptor {
+export class HttpMetricsMiddleware implements NestMiddleware {
   constructor(@Inject(METRICS) private readonly metrics: MetricsPort) {}
 
-  intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
-    const http = context.switchToHttp();
-    const request = http.getRequest<Request>();
-    const response = http.getResponse<Response>();
+  use(request: Request, response: Response, next: NextFunction): void {
     const startedAt = performance.now();
 
     response.once('finish', () => {
@@ -30,7 +22,7 @@ export class HttpMetricsInterceptor implements NestInterceptor {
       );
     });
 
-    return next.handle();
+    next();
   }
 }
 
