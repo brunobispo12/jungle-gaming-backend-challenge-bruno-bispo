@@ -89,6 +89,14 @@ async function tableNames(): Promise<string[]> {
   return rows.map((row) => row.table_name);
 }
 
+async function outboxPendingIndexDefinition(): Promise<string> {
+  const [row] = (await sql`
+    SELECT indexdef FROM pg_indexes
+    WHERE schemaname = 'public' AND indexname = 'outbox_pending_ix'
+  `) as { indexdef: string }[];
+  return row?.indexdef ?? '';
+}
+
 async function enumTypeNames(): Promise<string[]> {
   const rows = (await sql`
     SELECT typname FROM pg_type
@@ -156,6 +164,19 @@ describe('TST-021 migrations aplicam e revertem', () => {
 
     const missing = INDEXES.filter((name) => !present.has(name));
     expect(missing).toEqual([]);
+  });
+
+  test('reverter só a última migration devolve o índice anterior da outbox', async () => {
+    await orm.getMigrator().up();
+    expect(await outboxPendingIndexDefinition()).toContain('(occurred_at, id) INCLUDE');
+
+    await orm.getMigrator().down();
+    const reverted = await outboxPendingIndexDefinition();
+    expect(reverted).toContain('(next_attempt_at, claimed_until, occurred_at, id)');
+    expect(reverted).not.toContain('INCLUDE');
+
+    await orm.getMigrator().up();
+    expect(await outboxPendingIndexDefinition()).toContain('(occurred_at, id) INCLUDE');
   });
 
   test('triggers de imutabilidade existem', async () => {

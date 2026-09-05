@@ -9,8 +9,9 @@ As decisões de desenho, os trade-offs e as limitações estão em [`ARCHITECTUR
 
 O que existe e roda:
 
-- schema completo em migration versionada e reversível, com constraints, índices, triggers
-  de imutabilidade e privilégios de runtime separados da credencial de migration;
+- schema completo em migrations versionadas e reversíveis, com constraints, índices, triggers
+  de imutabilidade e privilégios de runtime separados da credencial de migration; `migrate:down`
+  reverte uma versão por vez, e o teste de migrations comprova as duas direções;
 - Docker Compose com PostgreSQL 16, LocalStack e três instâncias da aplicação;
 - health checks de liveness e readiness;
 - `GET /metrics` em formato Prometheus, com transações por status, replay e Inbox
@@ -44,7 +45,7 @@ O que existe e roda:
 - a superfície operacional — `/health/live`, `/health/ready` e `/metrics` — responde em
   **qualquer papel**, inclusive num processo sem `api`, porque métricas de um consumer ou
   de um publisher precisam ser raspáveis; sem o papel `api` a API de negócio responde 404;
-- 186 testes de unidade, 149 de integração e 11 de concorrência com três processos reais
+- 186 testes de unidade, 150 de integração e 11 de concorrência com três processos reais
   contra PostgreSQL e LocalStack reais, com os casos de uso rodando sob a role de runtime
   `wagering_app`, não sob a credencial de migration.
 

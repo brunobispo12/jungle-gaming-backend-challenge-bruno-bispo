@@ -262,12 +262,8 @@ export class Migration20260904000001_initial extends Migration {
     `);
 
     this.addSql(`
-      -- Ordered by what the claim orders by. Leading with next_attempt_at would
-      -- make the due-time filter a range scan and force a sort of every eligible
-      -- row on each claim, which publishes one message at a time.
       CREATE INDEX outbox_pending_ix
-        ON outbox_message (occurred_at, id)
-        INCLUDE (next_attempt_at, claimed_until)
+        ON outbox_message (next_attempt_at, claimed_until, occurred_at, id)
         WHERE published_at IS NULL;
     `);
 
