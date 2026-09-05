@@ -10,6 +10,7 @@ import {
   Post,
   Query,
   Res,
+  UseGuards,
 } from '@nestjs/common';
 import type { Response } from 'express';
 
@@ -31,9 +32,11 @@ import { ApiRoleGuard } from './api-role.guard';
 import { encodeLedgerCursor, parseLedgerQuery } from './ledger-query';
 import { requestContextOf } from './request-context';
 import {
+  boundedString,
   parseCreateWallet,
   parseSubmitWager,
   requireIdempotencyKey,
+  requireUuid,
 } from '@/interface/validation';
 
 // 201 says this request created the resource; a replay of the same fact returns
@@ -122,8 +125,9 @@ export class WageringController {
 
   @Get('wallets/:walletId')
   async getWallet(@Param('walletId') walletId: string): Promise<unknown> {
+    const validWalletId = requireUuid(walletId, 'walletId');
     const wallet = await this.unitOfWork.readOnly((repositories) =>
-      repositories.wallets.findById(walletId),
+      repositories.wallets.findById(validWalletId),
     );
     if (!wallet) {
       throw new ApplicationError(ErrorCode.ResourceNotFound, 'wallet not found');
@@ -137,10 +141,11 @@ export class WageringController {
     @Query('cursor') cursor?: string,
     @Query('limit') limit?: string,
   ): Promise<unknown> {
+    const validWalletId = requireUuid(walletId, 'walletId');
     const query = parseLedgerQuery(cursor, limit);
 
     const page = await this.unitOfWork.readOnly(async (repositories) => {
-      const wallet = await repositories.wallets.findById(walletId);
+      const wallet = await repositories.wallets.findById(validWalletId);
       if (!wallet) {
         throw new ApplicationError(ErrorCode.ResourceNotFound, 'wallet not found');
       }
@@ -157,12 +162,16 @@ export class WageringController {
 
   @Post('wallets/:walletId/reconciliation')
   @HttpCode(HttpStatus.OK)
-  async postReconciliation(@Param('walletId') walletId: string): Promise<unknown> {
-    const report = await this.reconcileWallet.execute(walletId);
+  async postReconciliation(
+    @Param('walletId') walletId: string,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<unknown> {
+    const report = await this.reconcileWallet.execute(requireUuid(walletId, 'walletId'));
 
     if (!report.consistent) {
       // Amounts stay out of the log line (README §12); the response carries them.
       this.logger.write('error', 'wallet reconciliation diverged', {
+        correlationId: requestContextOf(response).correlationId,
         walletId: report.walletId,
         checkedEntries: report.checkedEntries,
       });
@@ -207,8 +216,9 @@ export class WageringController {
 
   @Get('wagering/transactions/:transactionId')
   async getTransaction(@Param('transactionId') transactionId: string): Promise<unknown> {
+    const validTransactionId = requireUuid(transactionId, 'transactionId');
     const found = await this.unitOfWork.readOnly((repositories) =>
-      repositories.wagerTransactions.findById(transactionId),
+      repositories.wagerTransactions.findById(validTransactionId),
     );
     return transactionView(mustExist(found));
   }
@@ -218,8 +228,14 @@ export class WageringController {
     @Param('providerId') providerId: string,
     @Param('externalTransactionId') externalTransactionId: string,
   ): Promise<unknown> {
+    const validProviderId = boundedString(providerId, 'providerId', 64);
+    const validExternalId = boundedString(
+      externalTransactionId,
+      'externalTransactionId',
+      128,
+    );
     const found = await this.unitOfWork.readOnly((repositories) =>
-      repositories.wagerTransactions.findByExternalId(providerId, externalTransactionId),
+      repositories.wagerTransactions.findByExternalId(validProviderId, validExternalId),
     );
     return transactionView(mustExist(found));
   }

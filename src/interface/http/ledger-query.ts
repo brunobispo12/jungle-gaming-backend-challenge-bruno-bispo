@@ -1,5 +1,5 @@
 import type { LedgerCursor } from '@/application/ports';
-import { invalid } from '@/interface/validation';
+import { invalid, requireUuid } from '@/interface/validation';
 
 export const LEDGER_DEFAULT_LIMIT = 50;
 export const LEDGER_MAX_LIMIT = 200;
@@ -50,5 +50,5 @@ function decodeCursor(raw: string): LedgerCursor {
     invalid('cursor is not a valid ledger cursor');
   }
 
-  return { createdAt, id };
+  return { createdAt, id: requireUuid(id, 'cursor id') };
 }

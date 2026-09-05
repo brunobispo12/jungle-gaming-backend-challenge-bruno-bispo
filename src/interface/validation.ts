@@ -1,5 +1,6 @@
 import { ApplicationError, ErrorCode } from '@/application/errors';
-import type { MoneyProps } from '@/domain/money';
+import { InvalidMoneyError } from '@/domain/domain-error';
+import { Money, type MoneyProps } from '@/domain/money';
 import { INTERNAL_PROVIDER_ID, WagerTransactionKind } from '@/domain/wager-transaction';
 
 export function invalid(message: string): never {
@@ -13,21 +14,42 @@ export function asRecord(body: unknown): Record<string, unknown> {
   return body as Record<string, unknown>;
 }
 
-export function requiredString(source: Record<string, unknown>, field: string): string {
-  const value = source[field];
+export function boundedString(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== 'string' || value.trim() === '') {
     invalid(`${field} must be a non-empty string`);
+  }
+  if (value.length > maxLength) {
+    invalid(`${field} must have at most ${maxLength} characters`);
   }
   return value;
 }
 
-function optionalString(source: Record<string, unknown>, field: string): string | undefined {
+export function requiredString(
+  source: Record<string, unknown>,
+  field: string,
+  maxLength = Number.MAX_SAFE_INTEGER,
+): string {
+  const value = source[field];
+  return boundedString(value, field, maxLength);
+}
+
+function optionalString(
+  source: Record<string, unknown>,
+  field: string,
+  maxLength: number,
+): string | undefined {
   const value = source[field];
   if (value === undefined || value === null) {
     return undefined;
   }
-  if (typeof value !== 'string' || value.trim() === '') {
-    invalid(`${field} must be a non-empty string when present`);
+  return boundedString(value, field, maxLength);
+}
+
+const UUID_FORMAT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function requireUuid(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !UUID_FORMAT.test(value)) {
+    invalid(`${field} must be a UUID`);
   }
   return value;
 }
@@ -44,7 +66,14 @@ function money(source: Record<string, unknown>, field: string): MoneyProps {
   if (typeof props['currency'] !== 'string') {
     invalid(`${field}.currency must be a string`);
   }
-  return { amount: props['amount'], currency: props['currency'] };
+  try {
+    return Money.from({ amount: props['amount'], currency: props['currency'] }).toJSON();
+  } catch (error: unknown) {
+    if (error instanceof InvalidMoneyError) {
+      invalid(`${field} is invalid: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 export interface CreateWalletBody {
@@ -55,7 +84,7 @@ export interface CreateWalletBody {
 export function parseCreateWallet(body: unknown): CreateWalletBody {
   const source = asRecord(body);
   return {
-    playerId: requiredString(source, 'playerId'),
+    playerId: requiredString(source, 'playerId', 64),
     initialBalance: money(source, 'initialBalance'),
   };
 }
@@ -88,7 +117,7 @@ export function parseSubmitWager(body: unknown): SubmitWagerBody {
     invalid(`kind must be one of ${SUBMITTABLE_KINDS.join(', ')}`);
   }
 
-  const providerId = requiredString(source, 'providerId');
+  const providerId = requiredString(source, 'providerId', 64);
   if (providerId === INTERNAL_PROVIDER_ID) {
     throw new ApplicationError(
       ErrorCode.ReservedProviderId,
@@ -98,14 +127,18 @@ export function parseSubmitWager(body: unknown): SubmitWagerBody {
 
   const parsed: SubmitWagerBody = {
     providerId,
-    externalTransactionId: requiredString(source, 'externalTransactionId'),
-    playerId: requiredString(source, 'playerId'),
-    walletId: requiredString(source, 'walletId'),
-    roundId: requiredString(source, 'roundId'),
-    gameId: requiredString(source, 'gameId'),
+    externalTransactionId: requiredString(source, 'externalTransactionId', 128),
+    playerId: requiredString(source, 'playerId', 64),
+    walletId: requireUuid(source['walletId'], 'walletId'),
+    roundId: requiredString(source, 'roundId', 128),
+    gameId: requiredString(source, 'gameId', 128),
     kind: kind as WagerTransactionKind,
     money: money(source, 'money'),
-    referenceExternalTransactionId: optionalString(source, 'referenceExternalTransactionId'),
+    referenceExternalTransactionId: optionalString(
+      source,
+      'referenceExternalTransactionId',
+      128,
+    ),
   };
 
   const needsReference =
@@ -126,6 +159,9 @@ export function requireIdempotencyKey(header: unknown): string {
       ErrorCode.MissingIdempotencyKey,
       'the Idempotency-Key header is required',
     );
+  }
+  if (header.length > 255) {
+    invalid('Idempotency-Key must have at most 255 characters');
   }
   return header;
 }

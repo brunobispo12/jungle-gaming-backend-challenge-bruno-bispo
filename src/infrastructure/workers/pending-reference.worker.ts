@@ -27,6 +27,9 @@ export class PendingReferenceWorker implements OnApplicationBootstrap, OnApplica
         }
         logger.write('info', 'pending reference attempted', {
           transactionId: outcome.transactionId,
+          walletId: outcome.walletId,
+          providerId: outcome.providerId,
+          correlationId: outcome.correlationId,
           outcome: outcome.kind,
           ...(outcome.kind === 'settled'
             ? { status: outcome.status, failureCode: outcome.failureCode }

@@ -8,7 +8,7 @@ import {
 } from '@aws-sdk/client-sqs';
 import type { OnApplicationBootstrap, OnApplicationShutdown } from '@nestjs/common';
 
-import { ApplicationError } from '@/application/errors';
+import { ApplicationError, ErrorCode } from '@/application/errors';
 import { NOOP_METRICS, type MetricsPort } from '@/application/ports';
 import type {
   ConsumeOutcome,
@@ -20,6 +20,11 @@ import { parseWagerMessage, sha256Hex } from './envelope';
 
 const BASE_RETRY_DELAY_SECONDS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
+const PERMANENT_INPUT_CODES = new Set<ErrorCode>([
+  ErrorCode.InvalidPayload,
+  ErrorCode.ReferenceRequired,
+  ErrorCode.ReservedProviderId,
+]);
 
 export interface WagerConsumerOptions {
   readonly enabled: boolean;
@@ -139,8 +144,12 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
   private async decide(queueUrl: string, message: Message): Promise<void> {
     const rawBody = message.Body ?? '';
     const { outcome, context } = await this.outcomeOf(rawBody, message);
-    const messageId = message.MessageId ?? '';
-    const fields = { messageId, ...context };
+    const authoredMessageId = context?.messageId ?? authoredMessageIdOf(rawBody);
+    const fields = {
+      brokerMessageId: message.MessageId ?? '',
+      ...(authoredMessageId === undefined ? {} : { messageId: authoredMessageId }),
+      ...context,
+    };
 
     switch (outcome.kind) {
       case 'processed':
@@ -179,8 +188,17 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
   }
 
   private async outcomeOf(rawBody: string, message: Message): Promise<MessageDecision> {
+    let parsed: ReturnType<typeof parseWagerMessage>;
     try {
-      const parsed = parseWagerMessage(rawBody);
+      parsed = parseWagerMessage(rawBody);
+    } catch (error: unknown) {
+      if (error instanceof ApplicationError && PERMANENT_INPUT_CODES.has(error.code)) {
+        return { outcome: { kind: 'permanent', reason: `${error.code}: ${error.message}` } };
+      }
+      return { outcome: { kind: 'transient', reason: messageOf(error) } };
+    }
+
+    try {
       return {
         outcome: await this.consume.consume(
           {
@@ -192,15 +210,15 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
           parsed.command,
         ),
         context: {
+          messageId: parsed.messageId,
           correlationId: parsed.command.correlationId,
           walletId: parsed.command.walletId,
           providerId: parsed.command.providerId,
         },
       };
     } catch (error: unknown) {
-      if (error instanceof ApplicationError) {
-        return { outcome: { kind: 'permanent', reason: `${error.code}: ${error.message}` } };
-      }
+      // The use case returns its known permanent outcomes. Anything that escapes
+      // it is unexpected and must be retried, not silently converted into DLQ.
       return { outcome: { kind: 'transient', reason: messageOf(error) } };
     }
   }
@@ -266,6 +284,7 @@ function errorTypeOf(error: unknown): string {
 interface MessageDecision {
   readonly outcome: ConsumeOutcome;
   readonly context?: {
+    readonly messageId: string;
     readonly correlationId: string;
     readonly walletId: string;
     readonly providerId: string;
@@ -284,4 +303,19 @@ function safeReason(reason: string, fallback: string): string {
     return 'INBOX_PAYLOAD_CONFLICT';
   }
   return fallback;
+}
+
+function authoredMessageIdOf(rawBody: string): string | undefined {
+  try {
+    const parsed = JSON.parse(rawBody) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return undefined;
+    }
+    const value = (parsed as Record<string, unknown>)['messageId'];
+    return typeof value === 'string' && value.trim() !== '' && value.length <= 128
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }

@@ -12,6 +12,9 @@ import { PendingReferenceWorker } from '@/infrastructure/workers/pending-referen
 const SETTLED: PendingReferenceOutcome = {
   kind: 'settled',
   transactionId: '0192f291-27dd-7d3f-8071-5f8685deef37',
+  walletId: '0192f291-27dd-7d3f-8071-5f8685deef38',
+  providerId: 'provider-a',
+  correlationId: 'correlation-pending',
   status: 'PROCESSED',
 };
 
@@ -37,11 +40,15 @@ class ScriptedResolver extends ResolvePendingReferenceUseCase {
 }
 
 class SilentLogger extends JsonLogger {
+  readonly lines: Array<{ message: string; fields: LogFields }> = [];
+
   constructor() {
     super({});
   }
 
-  override write(_level: LogLevel, _message: string, _fields: LogFields = {}): void {}
+  override write(_level: LogLevel, message: string, fields: LogFields = {}): void {
+    this.lines.push({ message, fields });
+  }
 }
 
 async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -57,7 +64,8 @@ async function until(condition: () => boolean, timeoutMs = 2_000): Promise<void>
 describe('PendingReferenceWorker', () => {
   test('resolve pendências em sequência enquanto houver o que fazer', async () => {
     const resolver = new ScriptedResolver([SETTLED, SETTLED, SETTLED]);
-    const worker = new PendingReferenceWorker(resolver, new SilentLogger(), {
+    const logger = new SilentLogger();
+    const worker = new PendingReferenceWorker(resolver, logger, {
       enabled: true,
       tickDelayMs: 5,
       errorDelayMs: 5,
@@ -68,6 +76,18 @@ describe('PendingReferenceWorker', () => {
     await worker.onApplicationShutdown();
 
     expect(resolver.calls).toBeGreaterThanOrEqual(3);
+    expect(logger.lines).toContainEqual({
+      message: 'pending reference attempted',
+      fields: {
+        transactionId: SETTLED.transactionId,
+        walletId: SETTLED.walletId,
+        providerId: SETTLED.providerId,
+        correlationId: SETTLED.correlationId,
+        outcome: 'settled',
+        status: 'PROCESSED',
+        failureCode: undefined,
+      },
+    });
   });
 
   test('não roda quando o papel não está habilitado nesta instância', async () => {

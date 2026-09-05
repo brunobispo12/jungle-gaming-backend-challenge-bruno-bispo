@@ -23,10 +23,20 @@ export function pendingReferenceBackoffMs(attempts: number, jitter: number): num
 
 export type PendingReferenceOutcome =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'rescheduled'; readonly transactionId: string; readonly attempts: number }
+  | {
+      readonly kind: 'rescheduled';
+      readonly transactionId: string;
+      readonly walletId: string;
+      readonly providerId: string;
+      readonly correlationId: string;
+      readonly attempts: number;
+    }
   | {
       readonly kind: 'settled';
       readonly transactionId: string;
+      readonly walletId: string;
+      readonly providerId: string;
+      readonly correlationId: string;
       readonly status: WagerTransactionStatus;
       readonly failureCode?: FailureCode | undefined;
     };
@@ -157,7 +167,14 @@ export class ResolvePendingReferenceUseCase {
     pending.scheduleRetry({ nextAttemptAt: new Date(now.getTime() + delay) });
     await repositories.wagerTransactions.update(pending);
 
-    return { kind: 'rescheduled', transactionId: pending.id, attempts: pending.attempts };
+    return {
+      kind: 'rescheduled',
+      transactionId: pending.id,
+      walletId: pending.walletId,
+      providerId: pending.providerId,
+      correlationId: pending.correlationId,
+      attempts: pending.attempts,
+    };
   }
 
   private async settle(
@@ -202,6 +219,9 @@ export class ResolvePendingReferenceUseCase {
     return {
       kind: 'settled',
       transactionId: result.transactionId,
+      walletId: pending.walletId,
+      providerId: pending.providerId,
+      correlationId: pending.correlationId,
       status: result.status,
       failureCode: result.failureCode,
     };
@@ -219,6 +239,9 @@ export class ResolvePendingReferenceUseCase {
     return {
       kind: 'settled',
       transactionId: pending.id,
+      walletId: pending.walletId,
+      providerId: pending.providerId,
+      correlationId: pending.correlationId,
       status: pending.status,
       failureCode: pending.failureCode,
     };

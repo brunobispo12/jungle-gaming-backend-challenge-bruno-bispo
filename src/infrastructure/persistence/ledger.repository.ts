@@ -13,9 +13,14 @@ import { toLedgerEntry, toLedgerEntryRow } from './mappers';
 import { walletLedgerEntrySchema } from './rows';
 
 interface ReconstructionRow {
-  credited: string;
-  debited: string;
+  balance: string;
   entries: string;
+}
+
+function reconstructedMoney(amount: string, currency: string): Money {
+  return amount.startsWith('-')
+    ? Money.from({ amount: amount.slice(1), currency }).negate()
+    : Money.from({ amount, currency });
 }
 
 export class MikroLedgerRepository implements LedgerRepository {
@@ -50,14 +55,13 @@ export class MikroLedgerRepository implements LedgerRepository {
     };
   }
 
-  // Raw SQL: the aggregate is the reconciliation definition itself. Both FILTER
-  // sums stay non-negative so the subtraction happens in Money, where a negative
-  // difference is legitimate and must be reported rather than thrown.
+  // Raw SQL computes the signed net before Money enforces numeric(20,2)'s range.
+  // Gross lifetime turnover may exceed that range even when the valid net does not.
   async reconstructBalance(wallet: Wallet): Promise<ReconstructedBalance> {
     const [row] = await this.em.getConnection().execute<ReconstructionRow[]>(
       `SELECT
-         COALESCE(SUM(amount) FILTER (WHERE direction = 'CREDIT'), 0)::text AS credited,
-         COALESCE(SUM(amount) FILTER (WHERE direction = 'DEBIT'), 0)::text AS debited,
+         COALESCE(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END), 0)::text
+           AS balance,
          COUNT(*)::text AS entries
        FROM wallet_ledger_entry
        WHERE wallet_id = ?`,
@@ -66,12 +70,11 @@ export class MikroLedgerRepository implements LedgerRepository {
       this.em.getTransactionContext(),
     );
 
-    // An empty ledger has no currency of its own, so it comes from the wallet.
-    const asMoney = (amount: string): Money =>
-      Money.from({ amount, currency: wallet.currency });
-
     return {
-      balance: asMoney(row?.credited ?? '0').subtract(asMoney(row?.debited ?? '0')),
+      // Money.from intentionally rejects negative input contracts. Reconciliation
+      // must retain a negative net as diagnostic evidence, so negate a valid
+      // magnitude instead of discarding or clamping it.
+      balance: reconstructedMoney(row?.balance ?? '0', wallet.currency),
       entries: Number.parseInt(row?.entries ?? '0', 10),
     };
   }

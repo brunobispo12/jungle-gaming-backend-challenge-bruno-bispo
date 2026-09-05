@@ -25,7 +25,7 @@ export function correlationIdOf(consumerName: string, messageId: string): string
 
 export function parseWagerMessage(rawBody: string): WagerMessage {
   const envelope = asRecord(parseJson(rawBody));
-  const messageId = requiredString(envelope, 'messageId');
+  const messageId = requiredString(envelope, 'messageId', 128);
 
   const type = requiredString(envelope, 'type');
   if (type !== EXPECTED_TYPE) {
@@ -34,7 +34,7 @@ export function parseWagerMessage(rawBody: string): WagerMessage {
 
   const occurredAt = timestamp(envelope, 'occurredAt');
   const data = asRecord(envelope['data']);
-  const idempotencyKey = requiredString(data, 'idempotencyKey');
+  const idempotencyKey = requiredString(data, 'idempotencyKey', 255);
 
   return {
     messageId,
