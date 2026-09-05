@@ -64,6 +64,7 @@ const worker = new WagerConsumerWorker(crashingSqs, app.consumeWagerMessage, log
   dlqQueue: DLQ_QUEUE,
   batchSize: 1,
   waitTimeSeconds: 10,
+  visibilityTimeoutSeconds: 60,
   inFlightGraceMs: 1_000,
   shutdownWindowMs: 2_000,
 });

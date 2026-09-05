@@ -17,6 +17,10 @@ import { WagerConsumerWorker } from './wager-consumer.worker';
 const WAIT_TIME_SECONDS = 20;
 const BATCH_SIZE = 10;
 
+// Matches the VisibilityTimeout the queue is created with; the consumer restarts
+// this window per message so a slow batch never hands a message back mid flight.
+const VISIBILITY_TIMEOUT_SECONDS = 60;
+
 // The reserve between the two is what pays for returning the visibility of a
 // message the grace did not finish.
 const IN_FLIGHT_GRACE_MS = 25_000;
@@ -59,6 +63,7 @@ const SHUTDOWN_WINDOW_MS = 30_000;
           dlqQueue: env.queues.dlq,
           batchSize: BATCH_SIZE,
           waitTimeSeconds: WAIT_TIME_SECONDS,
+          visibilityTimeoutSeconds: VISIBILITY_TIMEOUT_SECONDS,
           inFlightGraceMs: IN_FLIGHT_GRACE_MS,
           shutdownWindowMs: SHUTDOWN_WINDOW_MS,
         }, metrics),

@@ -1,4 +1,4 @@
-import type { SQSClient } from '@aws-sdk/client-sqs';
+import { GetQueueAttributesCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import type { SQL } from 'bun';
 import {
   afterAll,
@@ -108,6 +108,7 @@ beforeAll(async () => {
     dlqQueue: DLQ_QUEUE,
     batchSize: 10,
     waitTimeSeconds: 1,
+    visibilityTimeoutSeconds: 60,
     inFlightGraceMs: 25_000,
     shutdownWindowMs: 30_000,
   });
@@ -269,7 +270,13 @@ describe('consumidor SQS contra fila real', () => {
         expect.objectContaining({
           level: 'error',
           message: 'message rejected as permanent',
-          fields: expect.objectContaining({ messageId, brokerMessageId: expect.any(String) }),
+          fields: expect.objectContaining({
+            messageId,
+            brokerMessageId: expect.any(String),
+            correlationId: expect.any(String),
+            walletId: expect.any(String),
+            providerId: expect.any(String),
+          }),
         }),
       );
       expect(logger.lines.some((line) => line.level === 'warn')).toBe(false);
@@ -324,6 +331,7 @@ describe('consumidor SQS contra fila real', () => {
       dlqQueue: DLQ_QUEUE,
       batchSize: 10,
       waitTimeSeconds: 1,
+      visibilityTimeoutSeconds: 60,
       inFlightGraceMs: 200,
       shutdownWindowMs: 400,
     });
@@ -419,6 +427,25 @@ describe('consumidor SQS contra fila real', () => {
     expect(await ledgerCount(wallet.id)).toBe(3);
     expect(await processedInboxCount([refundMessageId, betMessageId])).toBe(2);
   }, 30_000);
+
+  test('a fila de entrada redireciona para a DLQ depois do limite de entregas', async () => {
+    const attributes = await sqs.send(
+      new GetQueueAttributesCommand({
+        QueueUrl: inputUrl,
+        AttributeNames: ['RedrivePolicy', 'VisibilityTimeout'],
+      }),
+    );
+
+    const redrive = JSON.parse(attributes.Attributes?.['RedrivePolicy'] ?? '{}') as {
+      maxReceiveCount?: string | number;
+      deadLetterTargetArn?: string;
+    };
+
+    expect(Number(redrive.maxReceiveCount)).toBeGreaterThan(0);
+    expect(redrive.deadLetterTargetArn).toContain(DLQ_QUEUE);
+    // The consumer restarts this window per message, so the two have to agree.
+    expect(Number(attributes.Attributes?.['VisibilityTimeout'])).toBe(60);
+  });
 });
 
 async function statusOf(referenceExternalId: string, kind: string): Promise<string> {

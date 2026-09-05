@@ -96,6 +96,12 @@ export async function openWallet(
     body: JSON.stringify({ playerId, initialBalance: { amount: balance, currency: 'BRL' } }),
   });
 
+  if (!response.ok) {
+    throw new Error(
+      `wallet fixture failed for ${label}: ${response.status} ${await response.text()}`,
+    );
+  }
+
   const body = (await response.json()) as { id: string };
   return { id: body.id, playerId };
 }

@@ -83,6 +83,7 @@ beforeAll(async () => {
     batchSize: 10,
     waitTimeSeconds: 1,
     inFlightGraceMs: 1_000,
+    visibilityTimeoutSeconds: 60,
     shutdownWindowMs: 2_000,
   });
 }, CRASH_TIMEOUT_MS);

@@ -11,6 +11,9 @@ const INFRA = {
   AWS_ACCESS_KEY_ID: 'test',
   AWS_SECRET_ACCESS_KEY: 'test',
   NODE_ENV: 'test',
+  // Pinned, not inherited: the roles decide whether the consumer and the workers
+  // exist at all, and the scenarios must not depend on the developer's shell.
+  APP_ROLES: 'api,consumer,pending-worker,outbox-publisher',
 } as const;
 
 export interface Cluster {

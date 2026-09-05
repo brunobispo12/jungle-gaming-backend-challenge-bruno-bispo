@@ -13,7 +13,10 @@ import { WageringModule } from '@/interface/http/wagering.module';
 import { SqsModule } from '@/interface/sqs/sqs.module';
 
 @Module({
-  imports: [InfrastructureModule, MessagingModule, WorkersModule, WageringModule, SqsModule],
+  // Shutdown hooks fire in module registration order, and InfrastructureModule
+  // closes the ORM and the SQS client. It goes last so the workers still have
+  // both while they finish in flight work and return message visibility (§10).
+  imports: [MessagingModule, WorkersModule, WageringModule, SqsModule, InfrastructureModule],
   controllers: [HealthController],
   providers: [
     HealthService,

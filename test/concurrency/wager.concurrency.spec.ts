@@ -173,6 +173,20 @@ describe('README §13.3 — wallets distintas em paralelo', () => {
 
       await acquired.wait;
 
+      // Without a submission on the held wallet, an app that never took the lock
+      // would pass this test.
+      let contendedSettled = false;
+      const contended = submitWager(cluster.next(), {
+        externalTransactionId: `blocked-${label()}`,
+        playerId: held.playerId,
+        walletId: held.id,
+        kind: 'BET',
+        amount: '10.00',
+      });
+      contended.finally(() => {
+        contendedSettled = true;
+      });
+
       const startedAt = Date.now();
       const response = await submitWager(cluster.next(), {
         externalTransactionId: `unblocked-${label()}`,
@@ -181,18 +195,26 @@ describe('README §13.3 — wallets distintas em paralelo', () => {
         kind: 'BET',
         amount: '10.00',
       });
+      const elapsedMs = Date.now() - startedAt;
+      const blockedWhileHeld = !contendedSettled;
 
       release.open();
       await holding;
       await holder.end();
 
       // The app's lock_timeout is 20 s; a global lock would push this past it.
-      expect(Date.now() - startedAt).toBeLessThan(10_000);
+      expect(elapsedMs).toBeLessThan(10_000);
       expect(response.body.status).toBe('PROCESSED');
+      expect(blockedWhileHeld).toBe(true);
+      expect((await contended).body.status).toBe('PROCESSED');
 
       const state = await inspectWallet(sql, free.id);
       expect(state.balance.toString()).toBe('90.00');
       expect(state.reconstructed.equals(state.balance)).toBe(true);
+
+      const contendedState = await inspectWallet(sql, held.id);
+      expect(contendedState.balance.toString()).toBe('90.00');
+      expect(contendedState.reconstructed.equals(contendedState.balance)).toBe(true);
     },
     SCENARIO_TIMEOUT_MS,
   );

@@ -16,7 +16,7 @@ import type {
 } from '@/application/use-cases/consume-wager-message';
 import { QueueUrlCache } from '@/infrastructure/messaging/queue-urls';
 import type { JsonLogger } from '@/infrastructure/observability/json-logger';
-import { parseWagerMessage, sha256Hex } from './envelope';
+import { CONSUMER_NAME, correlationIdOf, parseWagerMessage, sha256Hex } from './envelope';
 
 const BASE_RETRY_DELAY_SECONDS = 5;
 const MAX_RETRY_DELAY_SECONDS = 60;
@@ -33,8 +33,17 @@ export interface WagerConsumerOptions {
   readonly dlqQueue: string;
   readonly batchSize: number;
   readonly waitTimeSeconds: number;
+  readonly visibilityTimeoutSeconds: number;
   readonly inFlightGraceMs: number;
   readonly shutdownWindowMs: number;
+}
+
+function raceWithDeadline(work: Promise<unknown>, deadlineMs: number): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, deadlineMs);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
 
 export function retryDelaySeconds(receiveCount: number): number {
@@ -47,6 +56,7 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
   private running = false;
   private stopping = false;
   private drained: Promise<void> | undefined;
+  private wakeFromBackoff: (() => void) | undefined;
 
   constructor(
     private readonly sqs: SQSClient,
@@ -66,15 +76,14 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
     this.drained = this.loop();
   }
 
-  // Shutdown stops the next receive and gives what is in flight the grace window.
-  // Whatever the grace does not finish has its visibility returned inside the rest
-  // of the shutdown window, so the message comes back at once instead of waiting
-  // out the queue timeout. What did not commit is never acked.
+  // What the grace does not finish has its visibility returned inside the rest of
+  // the shutdown window, so it comes back at once instead of waiting the timeout.
   async onApplicationShutdown(): Promise<void> {
     this.running = false;
     this.stopping = true;
+    this.wakeFromBackoff?.();
 
-    await Promise.race([this.drained ?? Promise.resolve(), Bun.sleep(this.options.inFlightGraceMs)]);
+    await raceWithDeadline(this.drained ?? Promise.resolve(), this.options.inFlightGraceMs);
     this.drained = undefined;
 
     await this.releaseInFlight();
@@ -88,12 +97,12 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
     }
 
     const reserve = Math.max(0, this.options.shutdownWindowMs - this.options.inFlightGraceMs);
-    await Promise.race([
+    await raceWithDeadline(
       Promise.allSettled(
         held.map(({ queueUrl, message }) => this.changeVisibility(queueUrl, message, 0)),
       ),
-      Bun.sleep(reserve),
-    ]);
+      reserve,
+    );
   }
 
   async pollOnce(): Promise<number> {
@@ -108,10 +117,15 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
     );
 
     const messages = received.Messages ?? [];
-    for (const message of messages) {
+    for (const [index, message] of messages.entries()) {
       if (this.stopping) {
         await this.changeVisibility(queueUrl, message, 0);
         continue;
+      }
+      // A contended wallet can hold one message for the whole lock timeout, so
+      // the rest of the batch restarts its window instead of inheriting the wait.
+      if (index > 0) {
+        await this.changeVisibility(queueUrl, message, this.options.visibilityTimeoutSeconds);
       }
       await this.handle(queueUrl, message);
     }
@@ -126,9 +140,20 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
       } catch (error: unknown) {
         this.logger.write('error', 'sqs receive loop failed', { errorType: errorTypeOf(error) });
         this.metrics.recordRetry('sqs-consumer', 'receive-error');
-        await Bun.sleep(BASE_RETRY_DELAY_SECONDS * 1_000);
+        await this.backoff();
       }
     }
+  }
+
+  private async backoff(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, BASE_RETRY_DELAY_SECONDS * 1_000);
+      this.wakeFromBackoff = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    this.wakeFromBackoff = undefined;
   }
 
   private async handle(queueUrl: string, message: Message): Promise<void> {
@@ -144,10 +169,8 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
   private async decide(queueUrl: string, message: Message): Promise<void> {
     const rawBody = message.Body ?? '';
     const { outcome, context } = await this.outcomeOf(rawBody, message);
-    const authoredMessageId = context?.messageId ?? authoredMessageIdOf(rawBody);
     const fields = {
       brokerMessageId: message.MessageId ?? '',
-      ...(authoredMessageId === undefined ? {} : { messageId: authoredMessageId }),
       ...context,
     };
 
@@ -192,10 +215,11 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
     try {
       parsed = parseWagerMessage(rawBody);
     } catch (error: unknown) {
+      const context = bestEffortContextOf(rawBody);
       if (error instanceof ApplicationError && PERMANENT_INPUT_CODES.has(error.code)) {
-        return { outcome: { kind: 'permanent', reason: `${error.code}: ${error.message}` } };
+        return { outcome: { kind: 'permanent', reason: `${error.code}: ${error.message}` }, context };
       }
-      return { outcome: { kind: 'transient', reason: messageOf(error) } };
+      return { outcome: { kind: 'transient', reason: messageOf(error) }, context };
     }
 
     try {
@@ -283,12 +307,14 @@ function errorTypeOf(error: unknown): string {
 
 interface MessageDecision {
   readonly outcome: ConsumeOutcome;
-  readonly context?: {
-    readonly messageId: string;
-    readonly correlationId: string;
-    readonly walletId: string;
-    readonly providerId: string;
-  };
+  readonly context?:
+    | {
+        readonly messageId?: string;
+        readonly correlationId?: string;
+        readonly walletId?: string;
+        readonly providerId?: string;
+      }
+    | undefined;
 }
 
 function safeReason(reason: string, fallback: string): string {
@@ -305,17 +331,42 @@ function safeReason(reason: string, fallback: string): string {
   return fallback;
 }
 
-function authoredMessageIdOf(rawBody: string): string | undefined {
+function bestEffortContextOf(rawBody: string): MessageDecision['context'] {
+  const envelope = objectOf(safeJson(rawBody));
+  if (envelope === undefined) {
+    return undefined;
+  }
+
+  const data = objectOf(envelope['data']) ?? {};
+  const messageId = shortTextOf(envelope['messageId']);
+  const walletId = shortTextOf(data['walletId']);
+  const providerId = shortTextOf(data['providerId']);
+
+  return {
+    ...(messageId === undefined
+      ? {}
+      : { messageId, correlationId: correlationIdOf(CONSUMER_NAME, messageId) }),
+    ...(walletId === undefined ? {} : { walletId }),
+    ...(providerId === undefined ? {} : { providerId }),
+  };
+}
+
+function safeJson(rawBody: string): unknown {
   try {
-    const parsed = JSON.parse(rawBody) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return undefined;
-    }
-    const value = (parsed as Record<string, unknown>)['messageId'];
-    return typeof value === 'string' && value.trim() !== '' && value.length <= 128
-      ? value
-      : undefined;
+    return JSON.parse(rawBody) as unknown;
   } catch {
     return undefined;
   }
+}
+
+function objectOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function shortTextOf(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' && value.length <= 128
+    ? value
+    : undefined;
 }
