@@ -9,7 +9,7 @@ import { SqsEventPublisher } from '@/infrastructure/messaging/sqs-event-publishe
 import { runtimeOrmConfig } from '@/infrastructure/persistence/orm.config';
 import { MikroOutboxClaimRepository } from '@/infrastructure/persistence/outbox-claim.repository';
 import { SCHEMAS } from '@/infrastructure/persistence/rows';
-import { connect, MIGRATOR_URL, readOutboxRow, seedOutboxMessage } from './support/database';
+import { APP_URL, connect, MIGRATOR_URL, readOutboxRow, seedOutboxMessage } from './support/database';
 import { drainQueue, EVENTS_QUEUE, queueUrl, receiveMessages, sqsClient } from './support/sqs';
 
 const LEASE_MS = 30_000;
@@ -37,7 +37,7 @@ function useCaseOf(publisherId: string, events = publisher): PublishOutboxMessag
 
 beforeAll(async () => {
   orm = await MikroORM.init({
-    ...runtimeOrmConfig(MIGRATOR_URL),
+    ...runtimeOrmConfig(APP_URL),
     entities: SCHEMAS,
     discovery: {},
   });

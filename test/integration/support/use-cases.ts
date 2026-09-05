@@ -10,7 +10,7 @@ import { UuidV7Generator } from '@/infrastructure/adapters';
 import { runtimeOrmConfig } from '@/infrastructure/persistence/orm.config';
 import { isTransientDatabaseFailure } from '@/infrastructure/persistence/postgres-errors';
 import { MikroUnitOfWork } from '@/infrastructure/persistence/unit-of-work';
-import { MIGRATOR_URL } from './database';
+import { APP_URL } from './database';
 
 export class FixedClock implements Clock {
   constructor(private current: Date) {}
@@ -37,8 +37,10 @@ export interface UseCases {
   close(): Promise<void>;
 }
 
+// The runtime role, never the migration credential: a use case that needs a
+// privilege the schema does not GRANT has to fail here, not in production.
 export async function bootUseCases(at = new Date('2026-07-29T15:00:00.000Z')): Promise<UseCases> {
-  const orm = await MikroORM.init(runtimeOrmConfig(MIGRATOR_URL));
+  const orm = await MikroORM.init(runtimeOrmConfig(APP_URL));
   const unitOfWork = new MikroUnitOfWork(orm, 20_000);
   const ids = new UuidV7Generator();
   const clock = new FixedClock(at);

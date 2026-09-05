@@ -9,7 +9,7 @@ import { runtimeOrmConfig } from '@/infrastructure/persistence/orm.config';
 import { SCHEMAS } from '@/infrastructure/persistence/rows';
 import { StaleWriteError } from '@/infrastructure/persistence/stale-write-error';
 import { MikroUnitOfWork } from '@/infrastructure/persistence/unit-of-work';
-import { MIGRATOR_URL, uniqueSuffix, uuid } from './support/database';
+import { APP_URL, uniqueSuffix, uuid } from './support/database';
 
 let orm: MikroORM;
 let unitOfWork: MikroUnitOfWork;
@@ -18,7 +18,7 @@ const AT = new Date('2026-07-29T15:00:00.000Z');
 
 beforeAll(async () => {
   orm = await MikroORM.init({
-    ...runtimeOrmConfig(MIGRATOR_URL),
+    ...runtimeOrmConfig(APP_URL),
     entities: SCHEMAS,
     discovery: {},
   });

@@ -1,4 +1,7 @@
 import { SQL } from 'bun';
+import { expect } from 'bun:test';
+
+import { Money } from '@/domain/money';
 
 export const MIGRATOR_URL =
   process.env['TEST_DATABASE_MIGRATION_URL'] ??
@@ -215,4 +218,40 @@ export async function readOutboxRow(sql: SQL, id: string): Promise<OutboxRow> {
     throw new Error(`outbox_message ${id} não existe`);
   }
   return row;
+}
+
+// The closing invariant README §13 demands of every test. The reconstruction
+// runs in Money, so a currency that drifted throws instead of comparing numbers.
+export async function expectWalletsMatchLedger(
+  sql: SQL,
+  walletIds: readonly string[],
+): Promise<void> {
+  for (const walletId of walletIds) {
+    const rows = (await sql`
+      SELECT
+        w.balance::text  AS balance,
+        w.currency       AS currency,
+        COALESCE(
+          SUM(CASE WHEN l.direction = 'CREDIT' THEN l.amount ELSE -l.amount END),
+          0
+        )::text AS reconstructed
+      FROM wallet w
+      LEFT JOIN wallet_ledger_entry l ON l.wallet_id = w.id
+      WHERE w.id = ${walletId}::uuid
+      GROUP BY w.balance, w.currency
+    `) as { balance: string; currency: string; reconstructed: string }[];
+
+    const row = rows[0];
+    if (row === undefined) {
+      throw new Error(`wallet ${walletId} não existe: a invariante final não pode ser verificada`);
+    }
+
+    const money = (amount: string): Money =>
+      amount.startsWith('-')
+        ? Money.from({ amount: amount.slice(1), currency: row.currency }).negate()
+        : Money.from({ amount, currency: row.currency });
+    const reconstructed = money(row.reconstructed);
+
+    expect(reconstructed.toString()).toBe(money(row.balance).toString());
+  }
 }

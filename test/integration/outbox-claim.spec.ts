@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:tes
 import { MikroOutboxClaimRepository } from '@/infrastructure/persistence/outbox-claim.repository';
 import { runtimeOrmConfig } from '@/infrastructure/persistence/orm.config';
 import { SCHEMAS } from '@/infrastructure/persistence/rows';
-import { connect, MIGRATOR_URL, readOutboxRow, seedOutboxMessage } from './support/database';
+import { APP_URL, connect, MIGRATOR_URL, readOutboxRow, seedOutboxMessage } from './support/database';
 
 const LEASE_MS = 30_000;
 
@@ -14,8 +14,10 @@ let sql: SQL;
 let outbox: MikroOutboxClaimRepository;
 
 beforeAll(async () => {
+  // The claim repository runs as the runtime role; only the fixture connection
+  // keeps the migration credential, because it needs DELETE to reset the table.
   orm = await MikroORM.init({
-    ...runtimeOrmConfig(MIGRATOR_URL),
+    ...runtimeOrmConfig(APP_URL),
     entities: SCHEMAS,
     discovery: {},
   });
