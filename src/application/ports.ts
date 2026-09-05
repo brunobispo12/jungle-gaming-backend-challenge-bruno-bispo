@@ -12,6 +12,24 @@ export interface IdGenerator {
   next(): string;
 }
 
+export interface ProviderCredentials {
+  readonly authorization?: string | undefined;
+}
+
+export interface ProviderIdentity {
+  readonly providerId: string;
+}
+
+// The extension point README §2 requires when authentication is not implemented.
+// The SQS entry point deliberately skips it: the queue is an internal channel,
+// and its payload is still fully validated by the domain.
+export interface ProviderIdentityPort {
+  resolve(
+    credentials: ProviderCredentials,
+    claimedProviderId: string,
+  ): Promise<ProviderIdentity>;
+}
+
 export interface WalletRepository {
   insertIfAbsent(wallet: Wallet): Promise<Wallet | undefined>;
   findById(id: string): Promise<Wallet | undefined>;

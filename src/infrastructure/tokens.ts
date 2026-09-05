@@ -3,6 +3,7 @@ export const ORM = Symbol('ORM');
 export const SQS_CLIENT = Symbol('SQS_CLIENT');
 export const LOGGER = Symbol('LOGGER');
 export const METRICS = Symbol('METRICS');
+export const PROVIDER_IDENTITY = Symbol('PROVIDER_IDENTITY');
 export const UNIT_OF_WORK = Symbol('UNIT_OF_WORK');
 export const CLOCK = Symbol('CLOCK');
 export const ID_GENERATOR = Symbol('ID_GENERATOR');

@@ -14,7 +14,7 @@ import {
 import type { Response } from 'express';
 
 import { ApplicationError, ErrorCode } from '@/application/errors';
-import type { UnitOfWork } from '@/application/ports';
+import type { ProviderIdentityPort, UnitOfWork } from '@/application/ports';
 import { CreateWalletUseCase } from '@/application/use-cases/create-wallet';
 import { ReconcileWalletUseCase } from '@/application/use-cases/reconcile-wallet';
 import {
@@ -26,7 +26,8 @@ import { WagerTransactionStatus } from '@/domain/wager-transaction';
 import type { Wallet } from '@/domain/wallet';
 import type { WalletLedgerEntry } from '@/domain/wallet-ledger-entry';
 import type { JsonLogger } from '@/infrastructure/observability/json-logger';
-import { LOGGER, UNIT_OF_WORK } from '@/infrastructure/tokens';
+import { LOGGER, PROVIDER_IDENTITY, UNIT_OF_WORK } from '@/infrastructure/tokens';
+import { ApiRoleGuard } from './api-role.guard';
 import { encodeLedgerCursor, parseLedgerQuery } from './ledger-query';
 import { requestContextOf } from './request-context';
 import {
@@ -87,12 +88,14 @@ function transactionView(transaction: WagerTransaction): unknown {
 }
 
 @Controller()
+@UseGuards(ApiRoleGuard)
 export class WageringController {
   constructor(
     private readonly createWallet: CreateWalletUseCase,
     private readonly submitWager: SubmitWagerTransactionUseCase,
     private readonly reconcileWallet: ReconcileWalletUseCase,
     @Inject(UNIT_OF_WORK) private readonly unitOfWork: UnitOfWork,
+    @Inject(PROVIDER_IDENTITY) private readonly providerIdentity: ProviderIdentityPort,
     @Inject(LOGGER) private readonly logger: JsonLogger,
   ) {}
 
@@ -172,14 +175,17 @@ export class WageringController {
   async postWager(
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
     @Res({ passthrough: true }) response: Response,
   ): Promise<unknown> {
     const key = requireIdempotencyKey(idempotencyKey);
     const parsed = parseSubmitWager(body);
     const context = requestContextOf(response);
+    const identity = await this.providerIdentity.resolve({ authorization }, parsed.providerId);
 
     const result = await this.submitWager.execute({
       ...parsed,
+      providerId: identity.providerId,
       idempotencyKey: key,
       correlationId: context.correlationId,
       causationId: context.requestId,
@@ -189,7 +195,7 @@ export class WageringController {
       correlationId: context.correlationId,
       transactionId: result.transactionId,
       walletId: parsed.walletId,
-      providerId: parsed.providerId,
+      providerId: identity.providerId,
       kind: parsed.kind,
       status: result.status,
       idempotentReplay: result.idempotentReplay,

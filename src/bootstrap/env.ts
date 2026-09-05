@@ -21,6 +21,7 @@ export interface AppEnv {
   readonly port: number;
   readonly databaseUrl: string;
   readonly databaseMigrationUrl: string;
+  readonly walletLockTimeoutMs: number;
   readonly roles: readonly AppRole[];
   readonly aws: AwsEnv;
   readonly queues: QueueEnv;
@@ -44,6 +45,18 @@ function readPort(name: string, fallback: number): number {
   }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`invalid ${name}: ${raw}`);
+  }
+  return parsed;
+}
+
+function readMilliseconds(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed < 1) {
     throw new Error(`invalid ${name}: ${raw}`);
   }
   return parsed;
@@ -73,6 +86,9 @@ export function loadEnv(): AppEnv {
     port: readPort('PORT', 3000),
     databaseUrl: read('DATABASE_URL'),
     databaseMigrationUrl: read('DATABASE_MIGRATION_URL', read('DATABASE_URL')),
+    // Below the 60 s SQS visibility timeout, so a contended wallet surfaces as a
+    // transient failure with room left to finish the message.
+    walletLockTimeoutMs: readMilliseconds('WALLET_LOCK_TIMEOUT_MS', 20_000),
     roles: readRoles(),
     aws: {
       region: read('AWS_REGION', 'us-east-1'),
