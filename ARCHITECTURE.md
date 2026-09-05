@@ -59,6 +59,8 @@ O código é separado em domain, application, infrastructure, interface e bootst
 
 As classes de domínio têm construtor privado ou protegido e estado encapsulado. Factories como create/from validam uma criação ou transição nova; rehydrate apenas recompõe o estado já validado e persistido, sem repetir regras de transição. Não há setters públicos para contornar Wallet, WagerTransaction ou WalletLedgerEntry.
 
+O README §6.5 esboça InboxMessage e OutboxMessage como classes com transições próprias, e aqui elas não existem: InboxMessage é o DTO de InboxRepository e a linha da outbox é escrita por OutboxRepository.enqueue e drenada por OutboxClaimRepository. A decisão é deliberada e vale só para essas duas. O que essas classes encapsulariam — elegibilidade, backoff, posse de um item — é justamente o que precisa ser decidido dentro da consulta para continuar correto com vários publishers: a elegibilidade é a cláusula WHERE do claim sob FOR UPDATE SKIP LOCKED, a posse é a condição `claimed_by = :publisherId` que toda escrita seguinte carrega, e o incremento de tentativa é `attempts + 1` no próprio UPDATE. Um agregado em memória reescreveria essas condições em TypeScript, onde elas não têm efeito sobre a corrida, e a linha ainda precisaria confiar no SQL. As duas garantias ficam no schema: PRIMARY KEY (consumer_name, message_id) na inbox e a posse verificada em toda transição da outbox, ambas cobertas por teste de integração.
+
 ### 3.1 Money sem ponto flutuante
 
 Money é imutável e guarda um Decimal de decimal.js com precisão 34. O caminho completo é `decimal string → Money(Decimal) → persistence row string → EntitySchema com type string → PostgreSQL numeric(20,2)`; a leitura faz o caminho inverso. Nenhuma etapa monetária usa Number, parseFloat, coerção unária, float ou double.
@@ -184,7 +186,7 @@ A igualdade entre Wallet.balance e a soma do ledger atravessa linhas e tabelas, 
 
 A reversão de uma migration é operação sobre schema, não um caminho runtime para apagar ledger. A role da aplicação não recebe DELETE nas tabelas financeiras/auditáveis e só atualiza as colunas mutáveis de cada lifecycle. Em wallet_ledger_entry, não recebe UPDATE, DELETE nem TRUNCATE; manutenção destrutiva exige a credencial separada de migration/operação.
 
-IDs de Wallet, WagerTransaction, WalletLedgerEntry, OutboxMessage e eventId são UUID v7 gerados por IdGenerator. O desenho usa sua unicidade, não supõe ordem temporal pelo UUID.
+IDs de Wallet, WagerTransaction, WalletLedgerEntry, outbox_message e eventId são UUID v7 gerados por IdGenerator. O desenho usa sua unicidade, não supõe ordem temporal pelo UUID.
 
 ## 5. Fronteira transacional e concorrência
 
@@ -383,7 +385,7 @@ A opção B também vale no worker. A aplicação verifica reversão anterior do
 
 Publicar diretamente antes do commit criaria evento de um fato que pode abortar. Publicar somente depois do commit sem intenção persistida perderia o evento se o processo morresse. Por isso o envelope entra em outbox_message na mesma transação da Wager, Wallet, ledger e Inbox quando aplicável.
 
-OutboxMessage.enqueue define attempts=0 e nextAttemptAt=occurredAt, deixando o item elegível imediatamente.
+OutboxRepository.enqueue grava attempts=0 e nextAttemptAt igual ao instante da transação que produziu o evento, deixando o item elegível assim que o commit termina.
 
 ### 9.1 Claim e publicação
 
