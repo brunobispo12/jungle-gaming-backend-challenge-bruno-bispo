@@ -58,13 +58,29 @@ export class MikroWagerTransactionRepository implements WagerTransactionReposito
     return row ? toWagerTransaction(row) : undefined;
   }
 
-  async hasProcessedReversal(referenceTransactionId: string, kind: string): Promise<boolean> {
-    const applied = await this.em.count(wagerTransactionSchema, {
-      referenceTransactionId,
-      kind,
-      status: WagerTransactionStatus.Processed,
-    });
-    return applied > 0;
+  // Same predicate as wager_reversal_guard, kept textual so the two cannot drift.
+  async hasActiveReversal(referenceTransactionId: string): Promise<boolean> {
+    const rows = await this.em.getConnection().execute<{ active: boolean }[]>(
+      `SELECT EXISTS (
+         SELECT 1
+         FROM wager_transaction applied
+         WHERE applied.reference_transaction_id = ?
+           AND applied.status = 'PROCESSED'
+           AND applied.kind IN ('REFUND', 'ROLLBACK')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wager_transaction undone
+             WHERE undone.reference_transaction_id = applied.id
+               AND undone.status = 'PROCESSED'
+               AND undone.kind = 'ROLLBACK'
+           )
+       ) AS active`,
+      [referenceTransactionId],
+      'all',
+      this.em.getTransactionContext(),
+    );
+
+    return rows[0]?.active === true;
   }
 
   async lockById(id: string): Promise<WagerTransaction | undefined> {

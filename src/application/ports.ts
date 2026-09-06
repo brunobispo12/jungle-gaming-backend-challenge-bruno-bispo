@@ -43,7 +43,7 @@ export interface WagerTransactionRepository {
   findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | undefined>;
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined>;
   findById(id: string): Promise<WagerTransaction | undefined>;
-  hasProcessedReversal(referenceTransactionId: string, kind: string): Promise<boolean>;
+  hasActiveReversal(referenceTransactionId: string): Promise<boolean>;
   lockById(id: string): Promise<WagerTransaction | undefined>;
   lockDuePendingReference(now: Date): Promise<WagerTransaction | undefined>;
   update(transaction: WagerTransaction): Promise<void>;

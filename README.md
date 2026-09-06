@@ -156,7 +156,7 @@ limpeza de rotina depois de uma suíte.
 | `bun run dev` | igual ao anterior, com watch |
 | `bun run migrate:up` | aplica as migrations pendentes |
 | `bun run migrate:down` | reverte a última migration |
-| `bun run migrate:fresh` | reverte tudo e reaplica |
+| `bun run migrate:fresh` | derruba o schema e reaplica do zero, em banco descartável |
 | `bun run test:integration` | sobe a infra de teste, recria o schema e roda a suíte |
 | `bun run test:concurrency` | sobe três processos reais e roda os cenários de paralelismo do README §13 (1, 2, 3, 4 e 8); os cenários 5 e 7 exigem matar um consumidor no meio do ciclo e vivem em `test:integration` |
 | `bun run test:load` | k6: cinco perfis, métricas e verificação financeira com stack isolada |

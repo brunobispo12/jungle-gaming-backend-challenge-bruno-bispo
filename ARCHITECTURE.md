@@ -15,7 +15,7 @@ O documento é longo porque cada decisão delegada pelo desafio recebe justifica
 5. Inbox, efeito financeiro, ledger e Outbox commitam juntos; o publisher usa claim com `FOR UPDATE SKIP LOCKED` e lease, e a entrega é at-least-once → [§7](#7-inbox-e-consumer-sqs), [§9](#9-transactional-outbox-e-eventos)
 6. O consumer dá ACK só depois do commit, envia à DLQ antes de apagar a origem e reinicia a visibilidade por mensagem do lote → [§7.2](#72-fifo-retry-e-shutdown)
 7. Referência ausente vira `PENDING_REFERENCE`; o worker roda sem líder, segura o row lock sem lease e encerra em 6 h ou 100 tentativas → [§8](#8-pending-references-e-reversões)
-8. Reversões seguem a opção B: uma referência aceita um `REFUND` e um `ROLLBACK`, e o índice parcial `(reference_transaction_id, kind)` fecha a corrida → [§3.5](#35-reversões--opção-b)
+8. Uma referência tem no máximo uma reversão vigente, de qualquer tipo, e a vaga reabre quando essa reversão é revertida; o trigger `wager_reversal_guard` fecha a corrida → [§3.5](#35-reversões--uma-vaga-por-referência)
 9. Reconciliação lê saldo e ledger no mesmo snapshot e nunca corrige → [§11](#11-reconciliação)
 10. `InboxMessage` e `OutboxMessage` não são agregados: o que encapsulariam é decidido no SQL do claim → [§3](#3-money-e-domínio)
 11. O schema carrega as invariantes: CHECKs, índices únicos parciais, triggers de imutabilidade e grants por coluna para a role de runtime → [§4](#4-postgresql-schema-e-invariantes)
@@ -141,26 +141,27 @@ WIN não exige referência. Se uma referência opcional é resolvida, ela é val
 
 A alternativa seria tratar WIN como REFUND e ROLLBACK, segurando-o em PENDING_REFERENCE até o BET aparecer. Rejeitei por duas razões. O README §7 regra 3 lista a exigência de referência apenas para REFUND e ROLLBACK, e nada obriga o provedor a informar o BET num WIN. E o efeito prático seria atrasar um crédito devido ao jogador por causa de um campo opcional: um WIN sem referência resolvida é um crédito válido, enquanto um REFUND sem referência é uma reversão que não sabe o que reverte. As duas situações não merecem o mesmo tratamento.
 
-### 3.5 Reversões — opção B
+### 3.5 Reversões — uma vaga por referência
 
 REFUND e ROLLBACK exigem referenceExternalTransactionId. A referência é resolvida por providerId e externalTransactionId e deve coincidir em provider, player, Wallet, moeda e rodada. O valor precisa ser exatamente igual em magnitude; reversão parcial está fora de escopo.
 
 REFUND referencia apenas BET PROCESSED. ROLLBACK referencia BET, WIN ou REFUND PROCESSED. ROLLBACK de BET produz crédito; ROLLBACK de WIN ou REFUND produz débito e é REJECTED com REVERSAL_WOULD_OVERDRAW se deixar saldo negativo.
 
-Adoto a opção B como interpretação candidata da frase “uma referência não pode ser revertida duas vezes pelo mesmo tipo de operação”:
+A regra 4 do README §7 diz que uma referência não pode ser revertida duas vezes pelo mesmo tipo de operação, e a tabela da mesma seção diz que REFUND reverte uma BET “uma única vez”. Ler só a regra 4 permite REFUND(BET) e ROLLBACK(BET) juntos, o que credita a mesma aposta duas vezes — crédito duplicado é falha eliminatória pelo §14. Leio as duas frases juntas:
 
-- uma referência pode ter no máximo um REFUND PROCESSED;
-- a mesma referência pode ter no máximo um ROLLBACK PROCESSED;
-- o banco impede repetição do mesmo kind;
-- REFUND e ROLLBACK podem referenciar diretamente a mesma transação.
+- uma referência tem no máximo **uma reversão vigente**, seja ela REFUND ou ROLLBACK;
+- a vaga reabre quando essa reversão é ela própria revertida por um ROLLBACK PROCESSED;
+- reverter o REFUND devolve a BET ao estado de não reembolsada, e um novo REFUND é aceito.
 
-A constraint correspondente é:
+A uniqueness depende de outra linha — se existe um ROLLBACK sobre a reversão vigente — e por isso nenhum índice parcial a expressa. A barreira no schema é um trigger:
 
-    UNIQUE (reference_transaction_id, kind)
-    WHERE status = 'PROCESSED'
-      AND kind IN ('REFUND', 'ROLLBACK')
+    CREATE TRIGGER wager_reversal_guard_tg
+      BEFORE INSERT OR UPDATE ON wager_transaction
+      FOR EACH ROW EXECUTE FUNCTION wager_reversal_guard();
 
-Portanto, BET → REFUND(BET) → ROLLBACK(BET) é aceito e pode gerar dois créditos. Registro essa consequência porque ela é o custo da leitura mais próxima do texto do enunciado. Não há cascata: reverter REFUND não reabre BET, e reverter BET não altera WIN.
+A função levanta 23505 quando a referência já tem uma reversão PROCESSED que ninguém reverteu. A aplicação faz a mesma pergunta com `hasActiveReversal` sob o lock da Wallet, e a rejeição de negócio é REFERENCE_ALREADY_REVERSED; o trigger é a última barreira, não o caminho normal.
+
+Não há cascata além desse nível: reverter uma BET não altera a WIN da rodada.
 
 ### 3.6 FailureCode
 
@@ -196,7 +197,7 @@ Migrations são versionadas, têm up/down e rodam com uma credencial separada. A
 | Wallet única e válida | UNIQUE(player_id,currency); balance numeric(20,2) CHECK(balance >= 0); version CHECK(version >= 1); UNIQUE(id,currency) sustenta a FK composta dos snapshots | requisições concorrentes e SQL direto contornam consultas prévias |
 | Identidades da Wager | UNIQUE(provider_id,idempotency_key) e UNIQUE(provider_id,external_transaction_id) | coordena todas as instâncias |
 | Valor e referência | amount numeric(20,2) CHECK(amount > 0) ao lado de currency char(3) NOT NULL da própria operação, coluna distinta de result_balance_currency; self FK reference_transaction_id ON DELETE RESTRICT; CHECKs por kind | evita valor ou vínculo estruturalmente inválido |
-| Reversão opção B | índice único parcial em (reference_transaction_id,kind) para REFUND/ROLLBACK PROCESSED | fecha a corrida entre duas reversões do mesmo kind |
+| Uma reversão vigente por referência | trigger wager_reversal_guard, que recusa uma reversão PROCESSED quando a referência já tem outra que ninguém reverteu | a condição depende de outra linha, então nenhum índice parcial a expressa |
 | Lifecycle e snapshot | CHECKs entre status, failure_code, processed_at e result_balance; FK `(wallet_id,result_balance_currency) → wallet(id,currency)` com MATCH SIMPLE quando há snapshot; trigger bloqueia UPDATE/DELETE de estado terminal | replay depende de histórico coerente e imutável |
 | Seleção de pending | índice parcial (next_attempt_at,id) para PENDING_REFERENCE | evita varrer o histórico |
 | Um ledger por efeito | UNIQUE(transaction_id,wallet_id) e FKs ON DELETE RESTRICT | retry ou mapper defeituoso não duplica nem deixa órfão |
@@ -411,7 +412,7 @@ Essa é a diferença para a Outbox: o pending worker pode manter o row lock porq
 
 Se ocorrer uma falha determinística permanente, a tentativa original faz rollback. Uma transação curta posterior trava a mesma Wager e a Wallet, confirma PENDING_REFERENCE, grava snapshot, INFRASTRUCTURE_FAILURE, processedAt e FAILED. Referências terminais continuam imutáveis.
 
-A opção B também vale no worker. A aplicação verifica reversão anterior do mesmo kind sob Wallet lock e o índice parcial é a última barreira contra concorrência.
+A regra da vaga única também vale no worker: a resolução tardia passa pelo mesmo `applyResolvedReversal`, consulta `hasActiveReversal` sob o lock da Wallet, e o trigger é a última barreira contra concorrência.
 
 ## 9. Transactional Outbox e eventos
 
@@ -638,7 +639,7 @@ Os casos de uso rodam nos testes sob a role de runtime `wagering_app`, nunca sob
 
 Estado atual, executado: **186 testes de unidade, 150 de integração e 11 de concorrência**, com `bun run typecheck` limpo. `bun run test` soma 189 porque roda também os três casos do harness de carga em `test/load/metrics.spec.ts`.
 
-Testes de unidade cobrem Money, Wallet, state machine, todos os kinds, reversões da opção B, payloadHash, backoffs, envelope SQS, classificação de erro do PostgreSQL, exposição de métricas e o ponto de extensão de identidade. Integração real cobre migrations e constraints, atomicidade entre Wallet/Wager/ledger/Inbox/Outbox, contrato HTTP completo, SQS, pending worker, Outbox, reconciliação, papéis e logging. O conflito de moeda tem caso completo: BET USD contra Wallet BRL termina REJECTED/CURRENCY_MISMATCH com snapshot BRL, sem alterar saldo, version, updatedAt ou ledger.
+Testes de unidade cobrem Money, Wallet, state machine, todos os kinds, a vaga única de reversão, payloadHash, backoffs, envelope SQS, classificação de erro do PostgreSQL, exposição de métricas e o ponto de extensão de identidade. Integração real cobre migrations e constraints, atomicidade entre Wallet/Wager/ledger/Inbox/Outbox, contrato HTTP completo, SQS, pending worker, Outbox, reconciliação, papéis e logging. O conflito de moeda tem caso completo: BET USD contra Wallet BRL termina REJECTED/CURRENCY_MISMATCH com snapshot BRL, sem alterar saldo, version, updatedAt ou ledger.
 
 Os testes de concorrência e crash usam paralelismo real, liberado por barreira explícita, nunca por sorte de escalonamento. Os cenários entregues são:
 
@@ -675,7 +676,7 @@ O método completo, o que cada perfil prova, o que a validação confere e os li
 - Autenticação funcional foi omitida. `ProviderIdentityPort` existe e está no caminho da submissão HTTP, mas o adapter atual confia na identidade declarada: qualquer chamador pode afirmar qualquer `providerId`.
 - OpenTelemetry não foi implementado; `bun run test:load` mede HTTP, SQL e Prometheus sem traces.
 - Os três Gauges operacionais são amostrados a cada 15 s por processo e aparecem repetidos por instância. Depois de uma falha de coleta, a última amostra permanece exposta sem garantia de freshness até uma coleta voltar a funcionar.
-- A opção B permite REFUND e ROLLBACK diretos sobre a mesma referência, inclusive dois créditos sobre uma BET.
+- Uma referência com reversão vigente recusa qualquer outra até que a vigente seja revertida, o que também recusa um ROLLBACK legítimo enquanto um REFUND indevido está de pé; desfazer exige o ROLLBACK do REFUND primeiro.
 - Uma referência opcional de WIN que ainda não existe não transforma a operação em PENDING_REFERENCE.
 - O gerador e a aplicação compartilham a máquina no setup local; contenção com Docker e outros processos influencia os números. O relatório registra esse ambiente, sem convertê-lo em promessa de capacidade.
 - Resultados do teste de carga valem para o ambiente e workload documentados, não como promessa geral de capacidade.

@@ -122,10 +122,10 @@ describe('TST-022 unicidade', () => {
     const failure = await expectSqlFailure(refund);
 
     expect(failure.sqlstate).toBe('23505');
-    expect(failure.message).toContain('wager_reversal_once_per_kind_uq');
+    expect(failure.message).toContain('already has an active reversal');
   });
 
-  test('opção B: a mesma referência aceita um REFUND e um ROLLBACK', async () => {
+  test('a mesma referência não recebe um REFUND e um ROLLBACK, que a creditariam duas vezes', async () => {
     const wallet = await seedWallet(migrator);
     const bet = await seedWager(migrator, {
       walletId: wallet.id,
@@ -135,8 +135,8 @@ describe('TST-022 unicidade', () => {
       status: 'PROCESSED',
     });
 
-    for (const kind of ['REFUND', 'ROLLBACK'] as const) {
-      await seedWager(migrator, {
+    const reversal = (kind: 'REFUND' | 'ROLLBACK'): Promise<string> =>
+      seedWager(migrator, {
         walletId: wallet.id,
         playerId: wallet.playerId,
         currency: wallet.currency,
@@ -145,14 +145,59 @@ describe('TST-022 unicidade', () => {
         referenceExternalTransactionId: `external-ref-${uniqueSuffix()}`,
         referenceTransactionId: bet,
       });
-    }
+
+    await reversal('REFUND');
+    const failure = await expectSqlFailure(() => reversal('ROLLBACK'));
+
+    expect(failure.sqlstate).toBe('23505');
+    expect(failure.message).toContain('already has an active reversal');
+  });
+
+  test('a vaga da referência reabre quando a reversão vigente é revertida', async () => {
+    const wallet = await seedWallet(migrator);
+    const bet = await seedWager(migrator, {
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      currency: wallet.currency,
+      kind: 'BET',
+      status: 'PROCESSED',
+    });
+
+    const firstRefund = await seedWager(migrator, {
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      currency: wallet.currency,
+      kind: 'REFUND',
+      status: 'PROCESSED',
+      referenceExternalTransactionId: `external-ref-${uniqueSuffix()}`,
+      referenceTransactionId: bet,
+    });
+
+    await seedWager(migrator, {
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      currency: wallet.currency,
+      kind: 'ROLLBACK',
+      status: 'PROCESSED',
+      referenceExternalTransactionId: `external-ref-${uniqueSuffix()}`,
+      referenceTransactionId: firstRefund,
+    });
+
+    await seedWager(migrator, {
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      currency: wallet.currency,
+      kind: 'REFUND',
+      status: 'PROCESSED',
+      referenceExternalTransactionId: `external-ref-${uniqueSuffix()}`,
+      referenceTransactionId: bet,
+    });
 
     const rows = (await migrator`
-      SELECT kind FROM wager_transaction
-      WHERE reference_transaction_id = ${bet}::uuid AND status = 'PROCESSED'
-      ORDER BY kind
-    `) as { kind: string }[];
-    expect(rows.map((row) => row.kind).sort()).toEqual(['REFUND', 'ROLLBACK']);
+      SELECT count(*)::int AS refunds FROM wager_transaction
+      WHERE reference_transaction_id = ${bet}::uuid AND kind = 'REFUND' AND status = 'PROCESSED'
+    `) as { refunds: number }[];
+    expect(rows[0]?.refunds).toBe(2);
   });
 });
 

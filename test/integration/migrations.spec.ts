@@ -3,6 +3,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 
 import { migrationOrmConfig } from '@/infrastructure/persistence/orm.config';
+import { DROP_SCHEMA_OBJECTS } from '@/infrastructure/persistence/schema-teardown';
 import { connect, MIGRATOR_URL } from './support/database';
 
 const TABLES = [
@@ -54,7 +55,7 @@ const CONSTRAINTS = [
 ] as const;
 
 const INDEXES = [
-  'wager_reversal_once_per_kind_uq',
+  'wager_reference_transaction_ix',
   'wager_pending_due_ix',
   'ledger_wallet_keyset_ix',
   'outbox_pending_ix',
@@ -64,8 +65,16 @@ const TRIGGERS = [
   'wallet_ledger_entry_immutable_tg',
   'wallet_ledger_entry_no_truncate_tg',
   'wager_transaction_guard_tg',
+  'wager_reversal_guard_tg',
   'inbox_message_guard_tg',
 ] as const;
+
+// down restores narrower rules, which cannot hold over rows the current schema
+// allows, so reversibility is proven on an empty database.
+async function rebuildFromScratch(): Promise<void> {
+  await sql.unsafe(DROP_SCHEMA_OBJECTS);
+  await orm.getMigrator().up();
+}
 
 let orm: MikroORM;
 let sql: SQL;
@@ -97,6 +106,13 @@ async function outboxPendingIndexDefinition(): Promise<string> {
   return row?.indexdef ?? '';
 }
 
+async function indexNames(): Promise<string[]> {
+  const rows = (await sql`
+    SELECT indexname FROM pg_indexes WHERE schemaname = 'public'
+  `) as { indexname: string }[];
+  return rows.map((row) => row.indexname);
+}
+
 async function enumTypeNames(): Promise<string[]> {
   const rows = (await sql`
     SELECT typname FROM pg_type
@@ -107,7 +123,7 @@ async function enumTypeNames(): Promise<string[]> {
 
 describe('TST-021 migrations aplicam e revertem', () => {
   test('down remove tabelas, tipos, funções e triggers', async () => {
-    await orm.getMigrator().up();
+    await rebuildFromScratch();
     await orm.getMigrator().down({ to: 0 });
 
     const tables = await tableNames();
@@ -166,17 +182,16 @@ describe('TST-021 migrations aplicam e revertem', () => {
     expect(missing).toEqual([]);
   });
 
-  test('reverter só a última migration devolve o índice anterior da outbox', async () => {
-    await orm.getMigrator().up();
-    expect(await outboxPendingIndexDefinition()).toContain('(occurred_at, id) INCLUDE');
+  test('reverter só a última migration devolve a barreira de reversão anterior', async () => {
+    await rebuildFromScratch();
+    expect(await indexNames()).toContain('wager_reference_transaction_ix');
 
     await orm.getMigrator().down();
-    const reverted = await outboxPendingIndexDefinition();
-    expect(reverted).toContain('(next_attempt_at, claimed_until, occurred_at, id)');
-    expect(reverted).not.toContain('INCLUDE');
+    expect(await indexNames()).toContain('wager_reversal_once_per_kind_uq');
+    expect(await indexNames()).not.toContain('wager_reference_transaction_ix');
 
     await orm.getMigrator().up();
-    expect(await outboxPendingIndexDefinition()).toContain('(occurred_at, id) INCLUDE');
+    expect(await indexNames()).toContain('wager_reference_transaction_ix');
   });
 
   test('triggers de imutabilidade existem', async () => {

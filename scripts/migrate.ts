@@ -1,6 +1,7 @@
 import { MikroORM } from '@mikro-orm/postgresql';
 
 import { migrationOrmConfig } from '@/infrastructure/persistence/orm.config';
+import { DROP_SCHEMA_OBJECTS } from '@/infrastructure/persistence/schema-teardown';
 
 type Command = 'up' | 'down' | 'fresh' | 'list';
 
@@ -48,7 +49,7 @@ try {
       break;
     }
     case 'fresh': {
-      await migrator.down({ to: 0 });
+      await orm.em.getConnection().execute(DROP_SCHEMA_OBJECTS);
       const applied = await migrator.up();
       console.log(`schema recriado: ${applied.map((m) => m.name).join(', ')}`);
       break;

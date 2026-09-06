@@ -275,10 +275,8 @@ export class SubmitWagerTransactionUseCase {
       return this.reject(repositories, transaction, failure, wallet.balance, now, context);
     }
 
-    const alreadyReversed = await repositories.wagerTransactions.hasProcessedReversal(
-      reference.id,
-      transaction.kind,
-    );
+    // Any kind: a BET reversed by REFUND and ROLLBACK is credited twice (§7.4).
+    const alreadyReversed = await repositories.wagerTransactions.hasActiveReversal(reference.id);
     if (alreadyReversed) {
       return this.reject(
         repositories,

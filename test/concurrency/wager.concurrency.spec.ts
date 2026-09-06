@@ -323,7 +323,7 @@ describe('reversões concorrentes sobre a mesma referência', () => {
   );
 
   test(
-    'opção B: REFUND e ROLLBACK simultâneos sobre a mesma BET aplicam os dois',
+    'REFUND e ROLLBACK simultâneos sobre a mesma BET aplicam um só, em qualquer instância',
     async () => {
       const wallet = await openWallet(cluster, '100.00', label());
       const betId = `optionb-bet-${label()}`;
@@ -352,12 +352,10 @@ describe('reversões concorrentes sobre a mesma referência', () => {
         ),
       );
 
-      // Declared consequence of option B: two reversals of different kinds over
-      // the same BET both apply, crediting twice.
-      expect(processed(responses)).toHaveLength(2);
+      expect(processed(responses)).toHaveLength(1);
 
       const state = await inspectWallet(sql, wallet.id);
-      expect(state.balance.toString()).toBe('125.00');
+      expect(state.balance.toString()).toBe('100.00');
       expect(state.reconstructed.equals(state.balance)).toBe(true);
     },
     SCENARIO_TIMEOUT_MS,
