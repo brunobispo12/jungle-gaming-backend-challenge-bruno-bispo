@@ -115,6 +115,15 @@ bun run test:infra:up
 bun run test:infra:down
 ```
 
+As suítes sobem a infraestrutura de que precisam e **deixam os containers no ar** ao terminar.
+É deliberado: subir PostgreSQL e LocalStack custa dezenas de segundos por execução, e um banco
+que sobrevive ao teste é o que permite investigar uma falha depois que ela acontece. Cada stack
+tem o seu comando de limpeza, e `infra:clean` derruba as três de uma vez, volumes inclusive:
+
+```bash
+bun run infra:clean
+```
+
 ## Comandos
 
 | Comando | O que faz |
@@ -133,7 +142,9 @@ bun run test:infra:down
 | `bun run test:concurrency` | sobe três processos reais e roda os cenários de paralelismo do README §13 (1, 2, 3, 4 e 8); os cenários 5 e 7 exigem matar um consumidor no meio do ciclo e vivem em `test:integration` |
 | `bun run test:load` | k6: cinco perfis, métricas e verificação financeira com stack isolada |
 | `bun run test:infra:up` | sobe só a infraestrutura de teste |
-| `bun run test:infra:down` | derruba a infraestrutura de teste |
+| `bun run test:infra:down` | derruba a infraestrutura de teste e seus volumes |
+| `bun run load:down` | derruba a stack de carga e seus volumes |
+| `bun run infra:clean` | derruba as três stacks — desenvolvimento, teste e carga — com volumes |
 
 ## Teste de carga
 
@@ -226,9 +237,10 @@ não uma distância até uma race. No perfil escasso o mínimo histórico é o p
 folga medida é nula por construção.
 A fila de eventos acumula mensagens publicadas porque não há consumidor downstream no
 produto; isso é diferente de Outbox não publicada, e é o motivo de o runner purgá-la antes
-de cada medição gerenciada. Para um banco novamente vazio, encerre
-a stack de carga entre execuções (`docker compose -f docker-compose.load.yml down -v`);
-esse comando remove somente os dados reproduzíveis dessa stack.
+de cada medição gerenciada. Para um banco novamente vazio, encerre a stack de carga entre
+execuções com `bun run load:down`; esse comando remove somente os dados reproduzíveis dessa
+stack. Meça com as outras stacks derrubadas: três LocalStacks simultâneos competem por CPU e
+os percentis saem piores do que a aplicação entrega.
 
 [`test/load/RESULTS.md`](test/load/RESULTS.md) é gerado pelo runner, não escrito à mão. O
 texto de método e limitações é fixo; todo número, tabela e comparação sai do run. Cada
