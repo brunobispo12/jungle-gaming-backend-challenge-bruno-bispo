@@ -236,7 +236,8 @@ texto de método e limitações é fixo; todo número, tabela e comparação sai
 execução sobrescreve o arquivo, inclusive quando um perfil reprova, porque o relatório é o
 registro da execução e não uma afirmação separada dela. Os dados brutos ficam em `artifacts/load/`,
 ignorados pelo Git. O cálculo de deltas e percentis do harness tem testes próprios, que rodam
-junto com `bun run test` por não precisarem de container.
+junto com `bun run test` por não precisarem de container. O método — o que cada perfil prova e o
+que a validação SQL confere — está em [`test/load/README.md`](test/load/README.md).
 
 ## Configuração
 

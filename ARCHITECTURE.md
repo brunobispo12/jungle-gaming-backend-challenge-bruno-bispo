@@ -4,6 +4,26 @@ Este documento descreve o serviço entregue: as decisões tomadas, os trade-offs
 
 A stack é Bun 1.x como runtime, package manager e test runner; TypeScript strict; NestJS; PostgreSQL; MikroORM; AWS SQS com LocalStack; e Docker Compose.
 
+## Sumário
+
+O documento é longo porque cada decisão delegada pelo desafio recebe justificativa própria. Para uma leitura de dez minutos, as decisões que sustentam o desenho, uma linha cada, com a seção que as desenvolve:
+
+1. `Money` é decimal.js com escala 2, entra e sai como string e vive em `numeric(20,2)`; `number` não aparece em nenhuma etapa → [§3.1](#31-money-sem-ponto-flutuante)
+2. A unidade de concorrência é a Wallet, serializada por `SELECT … FOR UPDATE` em READ COMMITTED; a coluna `version` é dado de domínio, não o mecanismo → [§5](#5-fronteira-transacional-e-concorrência)
+3. A identidade da Wager é reservada com `INSERT … ON CONFLICT DO NOTHING` antes do lock da Wallet, então 49 de 50 réplicas nunca chegam ao lock → [§6.2](#62-algoritmo-da-primeira-submissão)
+4. `Idempotency-Key` é a fonte da verdade, `payloadHash` é SHA-256 de JSON canônico, e o replay devolve o saldo histórico gravado com a transação → [§6](#6-idempotência-e-replay)
+5. Inbox, efeito financeiro, ledger e Outbox commitam juntos; o publisher usa claim com `FOR UPDATE SKIP LOCKED` e lease, e a entrega é at-least-once → [§7](#7-inbox-e-consumer-sqs), [§9](#9-transactional-outbox-e-eventos)
+6. O consumer dá ACK só depois do commit, envia à DLQ antes de apagar a origem e reinicia a visibilidade por mensagem do lote → [§7.2](#72-fifo-retry-e-shutdown)
+7. Referência ausente vira `PENDING_REFERENCE`; o worker roda sem líder, segura o row lock sem lease e encerra em 6 h ou 100 tentativas → [§8](#8-pending-references-e-reversões)
+8. Reversões seguem a opção B: uma referência aceita um `REFUND` e um `ROLLBACK`, e o índice parcial `(reference_transaction_id, kind)` fecha a corrida → [§3.5](#35-reversões--opção-b)
+9. Reconciliação lê saldo e ledger no mesmo snapshot e nunca corrige → [§11](#11-reconciliação)
+10. `InboxMessage` e `OutboxMessage` não são agregados: o que encapsulariam é decidido no SQL do claim → [§3](#3-money-e-domínio)
+11. O schema carrega as invariantes: CHECKs, índices únicos parciais, triggers de imutabilidade e grants por coluna para a role de runtime → [§4](#4-postgresql-schema-e-invariantes)
+12. Cada número de espera, retry e desligamento tem razão e par a preservar → [§13](#13-parâmetros-operacionais)
+13. Fora da entrega: autenticação (com `ProviderIdentityPort` como ponto de extensão), OpenTelemetry, double-entry → [§15](#15-limitações-e-escolhas-explícitas)
+
+Índice: [1 Escopo](#1-escopo-e-prioridades) · [2 Topologia](#2-topologia) · [3 Money e domínio](#3-money-e-domínio) · [4 Schema](#4-postgresql-schema-e-invariantes) · [5 Concorrência](#5-fronteira-transacional-e-concorrência) · [6 Idempotência](#6-idempotência-e-replay) · [7 Inbox e consumer](#7-inbox-e-consumer-sqs) · [8 Pending references](#8-pending-references-e-reversões) · [9 Outbox e eventos](#9-transactional-outbox-e-eventos) · [10 Contrato HTTP](#10-contrato-http) · [11 Reconciliação](#11-reconciliação) · [12 Observabilidade](#12-observabilidade) · [13 Parâmetros](#13-parâmetros-operacionais) · [14 Testes](#14-estratégia-de-testes) · [15 Limitações](#15-limitações-e-escolhas-explícitas)
+
 ## 1. Escopo e prioridades
 
 O serviço recebe operações de apostas por HTTP e SQS, mantém o saldo materializado de cada Wallet, registra toda movimentação em um ledger imutável e publica eventos de integração por Transactional Outbox.
@@ -642,23 +662,9 @@ Todo teste que movimenta saldo termina verificando:
     wallet.balance == saldo reconstruído pelo ledger
 ### 14.1 Teste de carga — diferencial opcional escolhido
 
-`bun run test:load` combina k6 (geração HTTP e percentis) com um runner Bun (infraestrutura, produtor SQS, métricas e verificação SQL). Não importa `bun:test`, não roda nas suítes normais e não muda o domínio nem as opções de transação da aplicação. Requer k6 instalado no PATH; não usa extensões ou imports remotos no script de carga.
+Dos diferenciais opcionais do README, escolhi o teste de carga porque é o único que produz evidência sobre as decisões desta entrega em vez de acrescentar uma feature: ele mede a hot wallet que o lock pessimista serializa, a tempestade de replay que a reserva de identidade absorve e o backlog que o publisher precisa drenar. `bun run test:load` usa k6 para gerar HTTP e percentis e um runner Bun para infraestrutura, produtor SQS, métricas e verificação SQL. São cinco perfis de 30 s com 12 VUs cada, e depois de cada um a validação confere no PostgreSQL saldo, ledger, Inbox, Outbox e eventos. `test/load/RESULTS.md` é renderizado pelo runner a partir do run, para que a análise nunca contradiga o artefato.
 
-No modo padrão, `docker-compose.load.yml` mantém PostgreSQL/LocalStack separados das stacks de desenvolvimento e testes normais. Três processos Bun usam todos os papéis, com a mesma role runtime. A credencial de migration aparece somente na aplicação de migrations pendentes. Cada execução cria identidades novas e preserva os históricos; os artefatos registram a quantidade de transações que já existia antes da carga. A configuração e o procedimento para reiniciar com banco vazio estão no README.
-
-Os cinco perfis têm, por padrão, 12 VUs constantes durante 30 s cada, sem think time:
-
-1. **Distribuído:** cada VU possui sua wallet e envia BETs únicas; requisições alternam entre as três instâncias. A separação evita contenção artificial entre VUs. Antes do benchmark, um probe mantém uma wallet travada, verifica a dependência por `pg_blocking_pids` e exige que outra wallet avance enquanto a primeira operação continua bloqueada.
-2. **Hot wallet:** mesma operação e concorrência do distribuído, mas todos os VUs disputam uma única wallet. Espera de lock e latência são medidas sem reduzir lock timeout ou mudar regras financeiras.
-3. **Idempotência:** todos enviam a mesma key/payload desde a primeira corrida. Cada VU compara suas respostas com a transação canônica persistida. O fechamento exige uma criação, os demais replays, um débito e um par de eventos financeiro/Wallet.
-4. **Escasso:** uma wallet aberta com `5.00 BRL` e ciclo BET/BET/WIN, todos os VUs sobre ela. O ciclo drena mais do que credita, então o saldo cai à fronteira em segundos e permanece nela: o excedente vira `REJECTED` com `INSUFFICIENT_FUNDS` sob a mesma contenção de lock, sem lançamento e sem alterar saldo. É o perfil que exercita a decisão de débito no ponto onde uma race produziria saldo negativo ou débito duplicado; o mínimo histórico de `balance_after` é a evidência direta. O perfil reprova se nenhuma rejeição ou nenhum débito ocorrer.
-5. **Misto:** sequência BET/BET/WIN/LOSS (50/25/25% em ciclos completos) em várias wallets, com 5 operações SQS/s simultâneas usando os mesmos kinds. IDs de grupo distintos permitem disputa entre workers; a cada cinco operações há uma reentrega autoral com outro deduplication ID do broker para exercitar Inbox. A distribuição realizada e o volume SQS estão no relatório.
-
-Cada operação vale `1.00 BRL` e a abertura é `1000000000.00 BRL`, exceto no perfil escasso; o saldo elevado evita medir rejeições por falta de saldo onde a intenção é medir processamento. Money permanece string; somas, reconstrução líquida e mínimos históricos são calculados no PostgreSQL. A validação cruza contagens aceitas e recusadas pelo k6 e envelopes SQS com transações persistidas, verifica hashes/identidades, estado terminal, correspondência e cardinalidade dos lançamentos, versão, saldo, Inbox e os tipos/quantidades de eventos esperados; uma transação `REJECTED` precisa carregar `failureCode`, não ter lançamento e emitir exatamente um `WagerTransactionRejected`. Após a carga, há um limite explícito de drain (180 s por padrão): Outbox pendente, claim residual ou entrada ainda em voo reprovam o cenário.
-
-O runner salva ambiente e configuração, versão k6/Bun/PostgreSQL, containers ativos, requests totais, throughput, taxa de erro, p50/p95/p99 e duração separada de carga e drain, e com esses dados renderiza `test/load/RESULTS.md`: método e limitações são texto fixo, todo número e toda comparação saem do run, e uma execução reprovada sobrescreve o arquivo com o próprio fracasso em vez de deixar os números anteriores no lugar. A separação existe para que a análise nunca contradiga o artefato. Durante o desenvolvimento deste relatório, uma frase interpretativa fixa foi invalidada pelos dados de uma execução; desde então, comparações desse tipo são calculadas e condicionais. Salva scrapes por instância antes/depois e a cada 2 s, além de backlog/idade e espera por locks amostrados no PostgreSQL, com o pico de `outbox_oldest_pending_age_seconds` do perfil no relatório. Essa amostragem tem custo: a consulta roda a cada 2 s durante a carga e a cada 200 ms durante o drain, na mesma instância que os publishers usam, e está dentro das durações reportadas. O índice parcial `outbox_pending_ix` limita a consulta ao conjunto pendente, mas o custo não foi isolado. Counters/histogramas usam deltas somados entre instâncias; gauges globais permanecem nos scrapes por instância e não são somados. O p95 de lock derivado do histograma é reportado como limite superior do bucket, não como percentil exato. A freshness dos gauges continua sujeita ao collector de 15 s e suas falhas.
-
-Zero erro de contrato/HTTP e checks válidos são thresholds obrigatórios; erros, inclusive timeouts, entram nos percentis e não são escondidos por retry do gerador. `LOAD_P95_MS` permite uma meta de latência explicitamente escolhida pelo operador. Não existe meta de RPS do challenge. Esse modelo fechado reduz a taxa quando o servidor demora e não mede capacidade sob taxa de chegada aberta. Não há tracing nem suspensão artificial de publisher. O backlog de mensagens já publicadas na fila de eventos é esperado: o produto não tem consumidor downstream dessa fila. Ele não equivale a Outbox não publicada, mas afeta o experimento: acumulado ao longo de várias execuções, faz o broker responder mais devagar a `SendMessage`, e o drain da Outbox degrada até estourar seu limite. Por isso o runner purga essa fila no modo gerenciado, e a comparação entre execuções deixa de piorar monotonicamente.
+O método completo, o que cada perfil prova, o que a validação confere e os limites do experimento estão em [`test/load/README.md`](test/load/README.md).
 
 ## 15. Limitações e escolhas explícitas
 

@@ -335,8 +335,8 @@ const LIMITATIONS = [
   '',
   'Um `LOAD_P95_MS` deliberadamente impossível reprova os perfis por latência e mantém as invariantes ' +
     'financeiras aprovadas em separado, o que confirma que os dois critérios falham de forma independente. As ' +
-    'variáveis de ambiente e o modo de stack externa estão no `README.md`; a metodologia e as decisões estão no ' +
-    '`ARCHITECTURE.md`, seção 13.1.',
+    'variáveis de ambiente e o modo de stack externa estão no `README.md`; a metodologia está em ' +
+    '`test/load/README.md` e a escolha do diferencial no `ARCHITECTURE.md`, seção 14.1.',
 ];
 
 export function renderReport(
