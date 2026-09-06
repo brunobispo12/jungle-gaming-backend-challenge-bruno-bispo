@@ -20,7 +20,7 @@ O documento é longo porque cada decisão delegada pelo desafio recebe justifica
 10. `InboxMessage` e `OutboxMessage` não são agregados: o que encapsulariam é decidido no SQL do claim → [§3](#3-money-e-domínio)
 11. O schema carrega as invariantes: CHECKs, índices únicos parciais, triggers de imutabilidade e grants por coluna para a role de runtime → [§4](#4-postgresql-schema-e-invariantes)
 12. Cada número de espera, retry e desligamento tem razão e par a preservar → [§13](#13-parâmetros-operacionais)
-13. Fora da entrega: autenticação (com `ProviderIdentityPort` como ponto de extensão), OpenTelemetry, double-entry → [§15](#15-limitações-e-escolhas-explícitas)
+13. Fora da entrega: autenticação (com `ProviderIdentityPort` como ponto de extensão) e double-entry → [§15](#15-limitações-e-escolhas-explícitas)
 
 Índice: [1 Escopo](#1-escopo-e-prioridades) · [2 Topologia](#2-topologia) · [3 Money e domínio](#3-money-e-domínio) · [4 Schema](#4-postgresql-schema-e-invariantes) · [5 Concorrência](#5-fronteira-transacional-e-concorrência) · [6 Idempotência](#6-idempotência-e-replay) · [7 Inbox e consumer](#7-inbox-e-consumer-sqs) · [8 Pending references](#8-pending-references-e-reversões) · [9 Outbox e eventos](#9-transactional-outbox-e-eventos) · [10 Contrato HTTP](#10-contrato-http) · [11 Reconciliação](#11-reconciliação) · [12 Observabilidade](#12-observabilidade) · [13 Parâmetros](#13-parâmetros-operacionais) · [14 Testes](#14-estratégia-de-testes) · [15 Limitações](#15-limitações-e-escolhas-explícitas)
 
@@ -41,7 +41,7 @@ Correção significa preservar simultaneamente estes invariantes:
 
 A ordem de prioridade é: exatidão de Money, atomicidade, idempotência, concorrência por Wallet, recuperação de falhas e, depois, throughput. Uma Wallet muito concorrida poderá esperar por lock; Wallets diferentes continuam independentes.
 
-Ficam fora desta entrega autenticação funcional, double-entry bookkeeping, correção automática de divergências, exactly-once e ordenação global de eventos. Também não entram CQRS, CommandBus, repositórios genéricos, ClickHouse nem dashboards elaborados. OpenTelemetry permanece não implementado; observabilidade é logs JSON em stdout e métricas Prometheus. O diferencial opcional de carga do README §14 é executável por `bun run test:load`.
+Ficam fora desta entrega autenticação funcional, double-entry bookkeeping, correção automática de divergências, exactly-once e ordenação global de eventos. Também não entram CQRS, CommandBus, repositórios genéricos, ClickHouse nem dashboards elaborados. A observabilidade é logs JSON em stdout e métricas Prometheus. O diferencial opcional de carga do README §14 é executável por `bun run test:load`.
 
 `ProviderIdentityPort` é o único ponto de extensão de autenticação, hoje implementado por `TrustedProviderIdentityAdapter`, que aceita a identidade declarada porque nenhum Identity Provider está ligado. O port fica no caminho real de `POST /wagering/transactions`: o controller resolve a identidade antes de submeter, e é o `providerId` resolvido que entra no comando e no `payloadHash`. Uma evolução troca só o adapter, por um que faça introspecção de OAuth2 client credentials e valide o `provider_id` do token contra o corpo. Health checks continuam públicos. A entrada SQS não passa pelo port porque a fila é canal interno (README §2); seus dados continuam sujeitos às mesmas validações de domínio.
 
@@ -579,8 +579,6 @@ Os três Gauges descrevem o último estado coletado e não são lidos no scrape.
 O contador de reconciliação existe porque o README §9 exige que divergência seja contabilizada em métrica, além de logada e sinalizada na resposta. Nada nesse caminho corrige saldo.
 
 Liveness não consulta dependências. Readiness diferencia PostgreSQL e SQS para tornar a falha operacionalmente diagnosticável. Health e métricas respondem em qualquer papel, inclusive num processo sem `api`.
-
-Ficam fora desta entrega, todos opcionais pelo README §12: OpenTelemetry e propagação de trace context, Collector, backend de traces, exemplars e dashboard. Nenhuma garantia financeira, de Inbox, ACK, lock ou Outbox depende de telemetria.
 
 ## 13. Parâmetros operacionais
 

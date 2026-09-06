@@ -60,8 +60,7 @@ em vez de proibir a segunda reversão de tipo diferente, porque essa proibição
 
 O diferencial de carga está disponível separadamente em `bun run test:load`, com k6,
 cinco perfis e validação financeira no PostgreSQL após cada cenário.
-Tracing com OpenTelemetry (README §12) continua não implementado. Autenticação funcional
-também não existe (README §2 não pontua); o ponto de extensão é `ProviderIdentityPort`, e
+Autenticação funcional não existe (README §2 não pontua); o ponto de extensão é `ProviderIdentityPort`, e
 o adapter atual confia na identidade declarada. Tudo o que está listado acima foi executado.
 
 ## Pré-requisitos
