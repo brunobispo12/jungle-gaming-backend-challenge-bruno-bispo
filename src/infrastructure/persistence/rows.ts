@@ -76,6 +76,7 @@ export interface OutboxMessageRow {
   claimedUntil: Date | null;
   lastError: string | null;
   publishedAt: Date | null;
+  abandonedAt: Date | null;
 }
 
 export const walletSchema = new EntitySchema<WalletRow>({
@@ -183,6 +184,7 @@ export const outboxMessageSchema = new EntitySchema<OutboxMessageRow>({
     claimedUntil: { type: 'Date', fieldName: 'claimed_until', nullable: true },
     lastError: { type: 'text', fieldName: 'last_error', nullable: true },
     publishedAt: { type: 'Date', fieldName: 'published_at', nullable: true },
+    abandonedAt: { type: 'Date', fieldName: 'abandoned_at', nullable: true },
   },
 });
 

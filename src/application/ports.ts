@@ -116,6 +116,7 @@ export interface OutboxClaimRepository {
     nextAttemptAt: Date,
     lastError: string,
   ): Promise<boolean>;
+  abandon(id: string, publisherId: string, abandonedAt: Date, lastError: string): Promise<boolean>;
 }
 
 export interface EventPublisher {

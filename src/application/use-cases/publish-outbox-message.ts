@@ -9,12 +9,19 @@ import {
 const BASE_DELAY_MS = 1_000;
 const MAX_DELAY_MS = 60_000;
 
+const MAX_ATTEMPTS = 600;
+
 export function outboxBackoffMs(attempts: number, jitter: number): number {
   const delay = Math.min(MAX_DELAY_MS, BASE_DELAY_MS * 2 ** (attempts - 1));
   return Math.round(delay * (0.8 + jitter * 0.4));
 }
 
-export type OutboxPublishOutcome = 'idle' | 'published' | 'retry-scheduled' | 'lease-lost';
+export type OutboxPublishOutcome =
+  | 'idle'
+  | 'published'
+  | 'retry-scheduled'
+  | 'abandoned'
+  | 'lease-lost';
 
 export interface OutboxPublisherOptions {
   readonly publisherId: string;
@@ -48,21 +55,12 @@ export class PublishOutboxMessageUseCase {
       try {
         await this.publisher.publish(claim);
       } catch (error: unknown) {
-        const delay = outboxBackoffMs(claim.attempts + 1, this.jitter());
-        const rescheduled = await this.outbox.reschedule(
-          claim.id,
-          this.options.publisherId,
-          new Date(this.clock.now().getTime() + delay),
-          error instanceof Error ? error.message : String(error),
-        );
-        const outcome = rescheduled ? 'retry-scheduled' : 'lease-lost';
-        if (rescheduled) {
-          this.metrics.recordRetry('outbox', 'publish-failed');
-        }
-        this.metrics.observeOutboxPublish(
-          outcome,
-          (performance.now() - startedAt) / 1_000,
-        );
+        const reason = error instanceof Error ? error.message : String(error);
+        const outcome =
+          claim.attempts + 1 >= MAX_ATTEMPTS
+            ? await this.abandon(claim.id, reason)
+            : await this.retry(claim, reason);
+        this.metrics.observeOutboxPublish(outcome, (performance.now() - startedAt) / 1_000);
         return outcome;
       }
 
@@ -85,5 +83,33 @@ export class PublishOutboxMessageUseCase {
       this.metrics.observeOutboxPublish('error', (performance.now() - startedAt) / 1_000);
       throw error;
     }
+  }
+
+  private async retry(
+    claim: { id: string; attempts: number },
+    reason: string,
+  ): Promise<OutboxPublishOutcome> {
+    const delay = outboxBackoffMs(claim.attempts + 1, this.jitter());
+    const rescheduled = await this.outbox.reschedule(
+      claim.id,
+      this.options.publisherId,
+      new Date(this.clock.now().getTime() + delay),
+      reason,
+    );
+
+    if (rescheduled) {
+      this.metrics.recordRetry('outbox', 'publish-failed');
+    }
+    return rescheduled ? 'retry-scheduled' : 'lease-lost';
+  }
+
+  private async abandon(id: string, reason: string): Promise<OutboxPublishOutcome> {
+    const abandoned = await this.outbox.abandon(
+      id,
+      this.options.publisherId,
+      this.clock.now(),
+      reason,
+    );
+    return abandoned ? 'abandoned' : 'lease-lost';
   }
 }

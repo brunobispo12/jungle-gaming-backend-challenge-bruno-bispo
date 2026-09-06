@@ -26,6 +26,7 @@ export class MikroOutboxRepository implements OutboxRepository {
       claimedUntil: null,
       lastError: null,
       publishedAt: null,
+      abandonedAt: null,
     }));
 
     await this.em.insertMany(outboxMessageSchema, rows);

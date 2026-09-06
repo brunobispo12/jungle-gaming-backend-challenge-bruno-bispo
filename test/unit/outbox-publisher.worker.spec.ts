@@ -16,6 +16,7 @@ class ScriptedPublisher extends PublishOutboxMessageUseCase {
         claim: async () => undefined,
         markPublished: async () => false,
         reschedule: async () => false,
+        abandon: async () => false,
       },
       { publish: async () => undefined },
       { now: () => new Date() },

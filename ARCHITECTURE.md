@@ -422,6 +422,8 @@ Uma referência que existe mas ainda não liquidou não é referência errada, �
 
 ## 9. Transactional Outbox e eventos
 
+O claim recusa uma mensagem cujo `aggregateId` ainda tem outra mais antiga não publicada. Sem isso, dois publishers concorrentes reclamam mensagens vizinhas do mesmo grupo e a mais nova pode chegar ao SQS primeiro — o `MessageGroupId` é o `aggregateId`, então a fila FIFO promete ordem por Wallet e entregava fora de ordem. O preço é que um grupo travado atrasa as próprias mensagens seguintes; grupos distintos continuam em paralelo.
+
 Publicar diretamente antes do commit criaria evento de um fato que pode abortar. Publicar somente depois do commit sem intenção persistida perderia o evento se o processo morresse. Por isso o envelope entra em outbox_message na mesma transação da Wager, Wallet, ledger e Inbox quando aplicável.
 
 OutboxRepository.enqueue grava attempts=0 e nextAttemptAt igual ao instante da transação que produziu o evento, deixando o item elegível assim que o commit termina.
@@ -620,7 +622,8 @@ O valor é configurável porque o ponto de equilíbrio depende do perfil de cont
 | Parâmetro | Valor | Por que este valor | Relação a preservar |
 |---|---|---|---|
 | Lease / timeout de envio | 30 s / 10 s | A folga de 3× reduz claim expirando durante uma chamada saudável, que faria dois publishers enviarem o mesmo evento | o timeout cobre a chamada inteira, resolução da URL da fila incluída; uma resolução pendurada consumiria o lease sem que o publisher soubesse |
-| Backoff de publicação | 1 s base, teto 60 s, jitter ±20% | Mais agressivo que o do consumidor porque falha de publicação não bloqueia grupo FIFO nenhum e o evento já está durável no PostgreSQL: o custo de tentar cedo é uma query, e o ganho é lag menor | o jitter existe para publishers concorrentes não voltarem em fase depois de uma indisponibilidade comum |
+| Backoff de publicação | 1 s base, teto 60 s, jitter ±20% | Mais agressivo que o do consumidor porque o evento já está durável no PostgreSQL: o custo de tentar cedo é uma query, e o ganho é lag menor | o jitter existe para publishers concorrentes não voltarem em fase depois de uma indisponibilidade comum |
+| Máximo de tentativas | 600 | No teto de 60 s são cerca de 10 h insistindo. Além disso o destino não está lento, está errado, e a linha é estacionada em `abandoned_at` com o último erro em vez de ocupar um publisher para sempre | precisa ser folgado o bastante para atravessar uma indisponibilidade longa de SQS; estacionar um evento válido é pior do que insistir |
 | Espera ociosa / após erro | 500 ms / 2 s | A espera ociosa é o lag que um evento novo herda ao chegar num publisher parado; 500 ms limita esse piso sem transformar o laço em polling caro. Os 2 s após erro evitam marretar um SQS que já está caído | o desligamento interrompe as duas esperas em vez de aguardá-las |
 
 ### 13.4 Worker de referências pendentes
@@ -678,7 +681,7 @@ O método completo, o que cada perfil prova, o que a validação confere e os li
 
 ## 15. Limitações e escolhas explícitas
 
-- A saída é at-least-once; consumidores deduplicam eventId, e publishers concorrentes podem inverter a ordem de ocorrência.
+- A saída é at-least-once; consumidores deduplicam por eventId. A ordem dentro de um `aggregateId` é preservada, porque o claim segura o grupo atrás da sua mensagem mais antiga não publicada; entre grupos não há ordem.
 - Retry bloqueia o grupo FIFO da Wallet; uma falha prolongada pode levar mensagem válida à DLQ e exigir redrive.
 - messageId único dentro do próprio provider é obrigação do produtor; a chave da Inbox inclui `provider_id`, então um provider não invalida a numeração de outro. Crash entre send da DLQ e delete da origem ainda pode duplicar a mensagem.
 - numeric(20,2) tem teto finito, e a reconciliação síncrona cresce com o histórico do ledger.
@@ -689,5 +692,7 @@ O método completo, o que cada perfil prova, o que a validação confere e os li
 - Os três Gauges operacionais são amostrados a cada 15 s por processo e aparecem repetidos por instância. Depois de uma falha de coleta, a última amostra permanece exposta sem garantia de freshness até uma coleta voltar a funcionar.
 - Uma referência com reversão vigente recusa qualquer outra até que a vigente seja revertida, o que também recusa um ROLLBACK legítimo enquanto um REFUND indevido está de pé; desfazer exige o ROLLBACK do REFUND primeiro.
 - Uma referência opcional de WIN que ainda não existe, ou que ainda não liquidou, não transforma a operação em PENDING_REFERENCE: o vínculo simplesmente não é gravado.
+- O publisher da Outbox segura um grupo FIFO atrás da mensagem mais antiga não publicada daquele `aggregateId`, então uma mensagem presa atrasa as seguintes da mesma Wallet. É o preço de a ordem por grupo significar alguma coisa; grupos distintos continuam paralelos.
+- Um evento que esgota 600 tentativas é estacionado em `abandoned_at` com o último erro e sai do claim. Ninguém o reenvia sozinho: a retomada é operação manual, e não há alerta próprio além da métrica.
 - O gerador e a aplicação compartilham a máquina no setup local; contenção com Docker e outros processos influencia os números. O relatório registra esse ambiente, sem convertê-lo em promessa de capacidade.
 - Resultados do teste de carga valem para o ambiente e workload documentados, não como promessa geral de capacidade.

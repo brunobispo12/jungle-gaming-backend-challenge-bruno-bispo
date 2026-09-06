@@ -43,10 +43,18 @@ interface RescheduleCall {
   readonly lastError: string;
 }
 
+interface AbandonCall {
+  readonly id: string;
+  readonly publisherId: string;
+  readonly abandonedAt: Date;
+  readonly lastError: string;
+}
+
 class FakeOutbox implements OutboxClaimRepository {
   readonly claimCalls: ClaimCall[] = [];
   readonly publishedCalls: PublishedCall[] = [];
   readonly rescheduleCalls: RescheduleCall[] = [];
+  readonly abandonCalls: AbandonCall[] = [];
 
   constructor(
     private readonly pending: OutboxClaim | undefined,
@@ -70,6 +78,16 @@ class FakeOutbox implements OutboxClaimRepository {
     lastError: string,
   ): Promise<boolean> {
     this.rescheduleCalls.push({ id, publisherId, nextAttemptAt, lastError });
+    return this.leaseHeld;
+  }
+
+  async abandon(
+    id: string,
+    publisherId: string,
+    abandonedAt: Date,
+    lastError: string,
+  ): Promise<boolean> {
+    this.abandonCalls.push({ id, publisherId, abandonedAt, lastError });
     return this.leaseHeld;
   }
 }

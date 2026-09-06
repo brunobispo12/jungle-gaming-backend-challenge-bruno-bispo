@@ -59,6 +59,7 @@ const INDEXES = [
   'wager_pending_due_ix',
   'ledger_wallet_keyset_ix',
   'outbox_pending_ix',
+  'outbox_group_order_ix',
 ] as const;
 
 const TRIGGERS = [
@@ -182,16 +183,19 @@ describe('TST-021 migrations aplicam e revertem', () => {
     expect(missing).toEqual([]);
   });
 
-  test('reverter só a última migration devolve a barreira de reversão anterior', async () => {
+  test('reverter só a última migration devolve os índices anteriores da outbox', async () => {
     await rebuildFromScratch();
-    expect(await indexNames()).toContain('wager_reference_transaction_ix');
+    expect(await outboxPendingIndexDefinition()).toContain('abandoned_at IS NULL');
+    expect(await indexNames()).toContain('outbox_group_order_ix');
 
     await orm.getMigrator().down();
-    expect(await indexNames()).toContain('wager_reversal_once_per_kind_uq');
-    expect(await indexNames()).not.toContain('wager_reference_transaction_ix');
+    expect(await outboxPendingIndexDefinition()).not.toContain('abandoned_at');
+    expect(await outboxPendingIndexDefinition()).toContain('(occurred_at, id) INCLUDE');
+    expect(await indexNames()).not.toContain('outbox_group_order_ix');
 
     await orm.getMigrator().up();
-    expect(await indexNames()).toContain('wager_reference_transaction_ix');
+    expect(await outboxPendingIndexDefinition()).toContain('abandoned_at IS NULL');
+    expect(await indexNames()).toContain('outbox_group_order_ix');
   });
 
   test('triggers de imutabilidade existem', async () => {
@@ -259,6 +263,7 @@ describe('TST-021 migrations aplicam e revertem', () => {
       'status',
     ]);
     expect(byTable.get('outbox_message')).toEqual([
+      'abandoned_at',
       'attempts',
       'claimed_by',
       'claimed_until',

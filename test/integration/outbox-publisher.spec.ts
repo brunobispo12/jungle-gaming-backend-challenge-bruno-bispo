@@ -9,7 +9,14 @@ import { SqsEventPublisher } from '@/infrastructure/messaging/sqs-event-publishe
 import { runtimeOrmConfig } from '@/infrastructure/persistence/orm.config';
 import { MikroOutboxClaimRepository } from '@/infrastructure/persistence/outbox-claim.repository';
 import { SCHEMAS } from '@/infrastructure/persistence/rows';
-import { APP_URL, connect, MIGRATOR_URL, readOutboxRow, seedOutboxMessage } from './support/database';
+import {
+  APP_URL,
+  connect,
+  MIGRATOR_URL,
+  readOutboxRow,
+  seedOutboxMessage,
+  uuid,
+} from './support/database';
 import { silentLogger } from './support/logging';
 import { drainQueue, EVENTS_QUEUE, queueUrl, receiveMessages, sqsClient } from './support/sqs';
 
@@ -202,6 +209,44 @@ describe('PublishOutboxMessageUseCase sobre PostgreSQL e SQS reais', () => {
 
     expect(rows[0]).toEqual({ unpublished: 0, still_claimed: 0 });
   }, 60_000);
+
+  test('um publisher não ultrapassa a mensagem mais antiga do mesmo aggregateId', async () => {
+    const aggregateId = uuid();
+    const older = await seedOutboxMessage(sql, {
+      aggregateId,
+      occurredAt: new Date(Date.now() - 10_000),
+      payload: { ordem: 1 },
+    });
+    const newer = await seedOutboxMessage(sql, {
+      aggregateId,
+      occurredAt: new Date(Date.now() - 5_000),
+      payload: { ordem: 2 },
+    });
+
+    const held = await outbox.claim('instance-lenta', new Date(), new Date(Date.now() + 30_000));
+    expect(held?.id).toBe(older.id);
+
+    expect(await useCaseOf('instance-rapida').run()).toBe('idle');
+
+    await outbox.markPublished(older.id, 'instance-lenta', new Date());
+    const next = await outbox.claim('instance-rapida', new Date(), new Date(Date.now() + 30_000));
+    expect(next?.id).toBe(newer.id);
+  });
+
+  test('esgotado o teto de tentativas a mensagem é estacionada, não reagendada para sempre', async () => {
+    const seeded = await seedOutboxMessage(sql, { attempts: 599 });
+    const failing = new SqsEventPublisher(sqs, 'fila-que-nao-existe.fifo', 5_000, silentLogger());
+
+    expect(await useCaseOf('instance-1', failing).run()).toBe('abandoned');
+
+    const rows = (await sql`
+      SELECT attempts, abandoned_at IS NOT NULL AS parked, last_error IS NOT NULL AS explained
+      FROM outbox_message WHERE id = ${seeded.id}::uuid
+    `) as { attempts: number; parked: boolean; explained: boolean }[];
+    expect(rows[0]).toEqual({ attempts: 599, parked: true, explained: true });
+
+    expect(await useCaseOf('instance-2').run()).toBe('idle');
+  });
 });
 
 interface Gate {
