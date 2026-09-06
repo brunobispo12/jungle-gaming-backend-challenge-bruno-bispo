@@ -14,14 +14,35 @@ export function asRecord(body: unknown): Record<string, unknown> {
   return body as Record<string, unknown>;
 }
 
+const CONTROL_CEILING = 0x20;
+const DELETE_CHARACTER = 0x7f;
+
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < CONTROL_CEILING || code === DELETE_CHARACTER) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// NFC because one identifier in two normalisations is a single identity to the
+// provider and two rows here; no control byte because PostgreSQL answers those
+// with a protocol violation, which reads as an outage instead of a bad field.
 export function boundedString(value: unknown, field: string, maxLength: number): string {
   if (typeof value !== 'string' || value.trim() === '') {
     invalid(`${field} must be a non-empty string`);
   }
-  if (value.length > maxLength) {
+  if (hasControlCharacter(value)) {
+    invalid(`${field} must not contain control characters`);
+  }
+
+  const normalized = value.normalize('NFC');
+  if (normalized.length > maxLength) {
     invalid(`${field} must have at most ${maxLength} characters`);
   }
-  return value;
+  return normalized;
 }
 
 export function requiredString(
@@ -169,15 +190,17 @@ export function parseSubmitWager(body: unknown): SubmitWagerBody {
   return parsed;
 }
 
-export function requireIdempotencyKey(header: unknown): string {
+// Node joins a repeated header into one comma separated value, which silently
+// becomes a different key than the one the provider will retry with.
+export function requireIdempotencyKey(header: unknown, occurrences = 1): string {
   if (typeof header !== 'string' || header.trim() === '') {
     throw new ApplicationError(
       ErrorCode.MissingIdempotencyKey,
       'the Idempotency-Key header is required',
     );
   }
-  if (header.length > 255) {
-    invalid('Idempotency-Key must have at most 255 characters');
+  if (occurrences > 1 || header.includes(',')) {
+    invalid('Idempotency-Key must be sent exactly once');
   }
-  return header;
+  return boundedString(header, 'Idempotency-Key', 255);
 }

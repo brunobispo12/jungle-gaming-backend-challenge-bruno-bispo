@@ -103,12 +103,32 @@ describe('Wallet — invariantes de saldo', () => {
     expect(wallet.version).toBe(1);
   });
 
-  test('movimento anterior à criação da wallet é rejeitado', () => {
+  test('movimento anterior à criação da wallet é aceito, porque as instâncias não compartilham relógio', () => {
     const wallet = openWallet('1000.00');
-    const before = new Date(AT.getTime() - 1);
+    const before = new Date(AT.getTime() - 60_000);
+
+    const entry = wallet.debit({
+      entryId: 'e',
+      transactionId: 't',
+      money: brl('1.00'),
+      at: before,
+    });
+
+    expect(entry.createdAt).toEqual(before);
+    expect(wallet.balance.toString()).toBe('999.00');
+    expect(wallet.version).toBe(2);
+  });
+
+  test('movimento com carimbo inválido é rejeitado', () => {
+    const wallet = openWallet('1000.00');
 
     expect(() =>
-      wallet.debit({ entryId: 'e', transactionId: 't', money: brl('1.00'), at: before }),
+      wallet.debit({
+        entryId: 'e',
+        transactionId: 't',
+        money: brl('1.00'),
+        at: new Date(Number.NaN),
+      }),
     ).toThrow(InvalidTimestampError);
     expect(wallet.updatedAt).toEqual(AT);
     expect(wallet.version).toBe(1);

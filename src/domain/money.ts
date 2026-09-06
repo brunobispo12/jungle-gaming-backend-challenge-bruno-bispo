@@ -15,6 +15,8 @@ const CURRENCY_FORMAT = /^[A-Z]{3}$/;
 const ZERO = '0';
 const MAX_ABSOLUTE = new Exact('999999999999999999.99');
 
+const ISO_4217 = new Set(Intl.supportedValuesOf('currency'));
+
 export class Money {
   private constructor(
     private readonly value: InstanceType<typeof Exact>,
@@ -65,6 +67,11 @@ export class Money {
   add(other: Money): Money {
     this.assertSameCurrency(other);
     return Money.of(this.value.plus(other.value), this.currency);
+  }
+
+  canAdd(other: Money): boolean {
+    this.assertSameCurrency(other);
+    return !this.value.plus(other.value).abs().greaterThan(MAX_ABSOLUTE);
   }
 
   subtract(other: Money): Money {
@@ -121,6 +128,9 @@ export class Money {
 function assertCurrency(currency: string): string {
   if (typeof currency !== 'string' || !CURRENCY_FORMAT.test(currency)) {
     throw new InvalidMoneyError(`invalid currency: ${JSON.stringify(currency)}`);
+  }
+  if (!ISO_4217.has(currency)) {
+    throw new InvalidMoneyError(`unknown ISO-4217 currency: ${currency}`);
   }
   return currency;
 }

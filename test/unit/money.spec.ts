@@ -5,6 +5,26 @@ import { Money } from '@/domain/money';
 
 const brl = (amount: string): Money => Money.from({ amount, currency: 'BRL' });
 
+describe('Money — moeda', () => {
+  test('recusa um código de três letras que não é ISO-4217', () => {
+    expect(() => Money.from({ amount: '1.00', currency: 'ZZZ' })).toThrow(InvalidMoneyError);
+    expect(() => Money.zero('ZZZ')).toThrow(InvalidMoneyError);
+  });
+
+  test('aceita os códigos que existem', () => {
+    for (const currency of ['BRL', 'USD', 'EUR']) {
+      expect(Money.from({ amount: '1.00', currency }).currency).toBe(currency);
+    }
+  });
+
+  test('canAdd responde antes de a soma estourar a faixa', () => {
+    const ceiling = Money.from({ amount: '999999999999999999.99', currency: 'BRL' });
+
+    expect(ceiling.canAdd(Money.zero('BRL'))).toBe(true);
+    expect(ceiling.canAdd(Money.from({ amount: '0.01', currency: 'BRL' }))).toBe(false);
+  });
+});
+
 describe('Money — entradas inválidas', () => {
   test.each([
     ['TST-001 NaN', 'NaN'],

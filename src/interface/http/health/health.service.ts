@@ -5,10 +5,11 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { AppEnv } from '@/bootstrap/env';
 import { APP_ENV, ORM, SQS_CLIENT } from '@/infrastructure/tokens';
 
+// No error text: README §9 keeps this endpoint unauthenticated, and a driver
+// message names the role and the host it failed to reach.
 export interface DependencyCheck {
   readonly status: 'up' | 'down';
   readonly latencyMs: number;
-  readonly error?: string;
 }
 
 export interface ReadinessReport {
@@ -62,11 +63,7 @@ async function timed(probe: () => Promise<void>): Promise<DependencyCheck> {
   try {
     await probe();
     return { status: 'up', latencyMs: Math.round(performance.now() - startedAt) };
-  } catch (error) {
-    return {
-      status: 'down',
-      latencyMs: Math.round(performance.now() - startedAt),
-      error: error instanceof Error ? error.message : 'unknown error',
-    };
+  } catch {
+    return { status: 'down', latencyMs: Math.round(performance.now() - startedAt) };
   }
 }

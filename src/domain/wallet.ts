@@ -110,6 +110,11 @@ export class Wallet {
     return !this._balance.isLessThan(money);
   }
 
+  canCredit(money: Money): boolean {
+    this.assertSameCurrency(money);
+    return this._balance.canAdd(money);
+  }
+
   debit(props: MovementProps): WalletLedgerEntry {
     this.assertMovement(props);
     if (!this.canDebit(props.money)) {
@@ -142,18 +147,22 @@ export class Wallet {
 
     this._balance = balanceAfter;
     this._version += 1;
-    this._updatedAt = props.at;
+    // Monotonic, because wallet_updated_after_created_ck holds and the instance
+    // that took this request may be behind the one that took the last.
+    this._updatedAt = props.at > this._updatedAt ? props.at : this._updatedAt;
 
     return entry;
   }
 
+  // Never compare against createdAt here: instances do not share a clock, and a
+  // valid bet would fail on skew alone (README §8).
   private assertMovement(props: MovementProps): void {
     this.assertSameCurrency(props.money);
     if (!props.money.isPositive()) {
       throw new InvalidLedgerEntryError(`movement requires a positive amount: ${props.money}`);
     }
-    if (props.at.getTime() < this.createdAt.getTime()) {
-      throw new InvalidTimestampError(props.at, this.createdAt);
+    if (!Number.isFinite(props.at.getTime())) {
+      throw new InvalidTimestampError(props.at);
     }
   }
 

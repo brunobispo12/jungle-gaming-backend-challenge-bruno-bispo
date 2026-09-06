@@ -87,13 +87,17 @@ Money é imutável e guarda um Decimal de decimal.js com precisão 34. O caminho
 
 Nos contratos de entrada, 25, 25.0 e 25.00 são normalizados para 25.00 antes do payloadHash. Notação científica, NaN, Infinity, string vazia, mais de duas casas, valores negativos e valores acima de 999999999999999999.99 são rejeitados. Money pode representar zero e valores negativos produzidos internamente por `negate`, como a diferença de reconciliação; initialBalance admite zero. O contrato de Wager exige amount maior que zero e rejeita `0.00` com AMOUNT_NOT_POSITIVE antes da reserva. Não existe arredondamento silencioso.
 
-Money compara moeda em toda operação. O modelo permanece multi-moeda, embora a entrega possa operar apenas com BRL. Direção financeira é representada por LedgerDirection, não pelo sinal do valor.
+Money compara moeda em toda operação e aceita apenas códigos ISO-4217 existentes, lidos de `Intl.supportedValuesOf('currency')`. Um formato de três letras maiúsculas aceitaria `ZZZ`, e uma Wallet aberta numa moeda que não existe nunca mais transaciona: toda operação vira CURRENCY_MISMATCH. O modelo permanece multi-moeda, embora a entrega possa operar apenas com BRL. Direção financeira é representada por LedgerDirection, não pelo sinal do valor.
+
+`canAdd` responde se uma soma cabe na faixa antes de tentá-la. É o que transforma um crédito acima do teto de `numeric(20,2)` em rejeição de negócio com BALANCE_LIMIT_EXCEEDED, em vez de uma exceção que o provedor lê como payload inválido.
 
 ### 3.2 Wallet e ledger
 
 Wallet é o aggregate root do saldo. Wallet.debit e Wallet.credit validam moeda e saldo, calculam o novo Money e devolvem a única WalletLedgerEntry da alteração, com balanceBefore e balanceAfter. Balance, version, updatedAt e o lançamento são persistidos na mesma transação.
 
 version nasce em 1 e só incrementa quando balance muda. Ela é dado de domínio e segue nos eventos; não é o mecanismo de concorrência. LOSS, PENDING_REFERENCE e REJECTED podem observar o saldo sob lock sem alterar version ou updatedAt.
+
+O carimbo do movimento não é comparado com o createdAt da Wallet. As três instâncias não compartilham relógio, e o README §8 proíbe apoiar correção nessa suposição: uma aposta válida submetida na instância cujo relógio está atrás falharia por skew, não por regra. O lançamento guarda o instante observado, e updatedAt da Wallet é monotônico, porque wallet_updated_after_created_ck continua valendo. A ordenação do ledger é o keyset (created_at, id), que desempata pelo UUID v7.
 
 WalletLedgerEntry não possui transições. amount é sempre positivo e direction informa DEBIT ou CREDIT. A factory valida:
 
@@ -120,7 +124,7 @@ Transições permitidas:
 
 PROCESSED, REJECTED e FAILED são terminais. processedAt existe exatamente nesses estados. Um trigger rejeita UPDATE ou DELETE de uma linha que já estava terminal.
 
-FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED. A classificação reconhece o SQLSTATE e também a perda de socket que chega sem SQLSTATE, porque tratar uma queda de rede como determinística encerraria uma pendência legítima.
+FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED. A classificação reconhece o SQLSTATE e também a perda de socket que chega sem SQLSTATE, porque tratar uma queda de rede como determinística encerraria uma pendência legítima. Da classe 08 só os estados de conexão são transitórios: 08P01 é protocol_violation, levantado por um statement que nenhuma retentativa conserta, e classificá-lo como transitório respondia 503 com Retry-After a um payload impossível. Erro de domínio também é permanente para o consumidor SQS: redelivery gastaria o orçamento de retry numa mensagem que só pode falhar do mesmo jeito.
 
 FAILED não tem evento próprio. Publica `WagerTransactionRejected` com `failureCode = INFRASTRUCTURE_FAILURE`, e esse código distingue o caso de uma recusa por regra de negócio no mesmo tipo de evento. Um quinto tipo de evento, fora dos quatro mínimos do README §11, não acrescentaria informação que o `failureCode` já dá ao consumidor.
 
@@ -169,7 +173,7 @@ FailureCode é resultado persistido de negócio ou de FAILED; ErrorCode pertence
 
 | Grupo | FailureCode |
 |---|---|
-| Saldo | INSUFFICIENT_FUNDS; REVERSAL_WOULD_OVERDRAW |
+| Saldo | INSUFFICIENT_FUNDS; REVERSAL_WOULD_OVERDRAW; BALANCE_LIMIT_EXCEEDED |
 | Referência ausente ou em estado inválido | REFERENCE_NOT_FOUND; REFERENCE_NOT_PROCESSED; REFERENCE_KIND_NOT_REVERSIBLE |
 | Referência incompatível | REFERENCE_MISMATCH; REVERSAL_AMOUNT_MISMATCH; REFERENCE_ALREADY_REVERSED |
 | Moeda | CURRENCY_MISMATCH, tanto para operação em moeda diferente da Wallet quanto para referência em outra moeda |
@@ -178,7 +182,7 @@ FailureCode é resultado persistido de negócio ou de FAILED; ErrorCode pertence
 
 A granularidade da taxonomia segue o critério do README §7.2: cada código precisa bastar para o provedor decidir entre reenviar, corrigir o payload ou desistir. Os grupos seguem essas três saídas. Saldo é situação de estado, e reenviar mais tarde pode funcionar. Referência ausente ou ainda não processada é questão de tempo e ordem, e a espera é do sistema, não do provedor. Referência incompatível, moeda e Wallet são defeito de payload, e reenviar o mesmo corpo nunca vai passar. INFRASTRUCTURE_FAILURE é o único que não fala sobre a operação enviada. Com um código a menos, o provedor teria que ler a mensagem de texto para decidir; com um código a mais por variação de mensagem, a taxonomia ficaria instável entre versões.
 
-Os dois códigos de saldo são separados porque uma BET sem fundos e uma reversão que causaria saldo negativo pedem diagnósticos diferentes. OPENING recebido por HTTP ou SQS é erro de contrato e falha antes da reserva da Wager. Os demais erros de protocolo usam ErrorCode estável conforme a matriz HTTP e nunca são persistidos como resultado financeiro.
+Os três códigos de saldo são separados porque pedem diagnósticos diferentes: uma BET sem fundos, uma reversão que causaria saldo negativo e um crédito que estouraria o teto de `numeric(20,2)` são situações operacionais distintas. O teto é limite do nosso schema, não defeito do payload, então é rejeição persistida com evento, e não erro de protocolo. OPENING recebido por HTTP ou SQS é erro de contrato e falha antes da reserva da Wager. Os demais erros de protocolo usam ErrorCode estável conforme a matriz HTTP e nunca são persistidos como resultado financeiro.
 
 ## 4. PostgreSQL: schema e invariantes
 
@@ -481,6 +485,7 @@ O contrato distingue erro de protocolo de resultado de negócio. O critério da 
 | Resultado | HTTP | Persistência |
 |---|---:|---|
 | Payload/header inválido | 400 | nada |
+| Idempotency-Key repetido no header | 400 | nada |
 | Corpo acima do limite do parser | 413 | nada |
 | Charset ou encoding não suportado | 415 | nada |
 | Idempotency-Key com payload divergente | 409 | nada novo |
@@ -499,6 +504,8 @@ O contrato distingue erro de protocolo de resultado de negócio. O critério da 
 
 POST /wallets retorna 201. A unicidade playerId+currency usa INSERT … ON CONFLICT DO NOTHING RETURNING; a perdedora lê a vencedora e retorna 409 WALLET_ALREADY_EXISTS com existingWalletId. Esse endpoint não aceita Idempotency-Key: o próprio par playerId+currency é a chave, e um retry de rede recebe o mesmo 409 com o existingWalletId.
 
+Um `Idempotency-Key` repetido no header é recusado com 400 em vez de aceito: Node junta cabeçalhos repetidos numa única string separada por vírgula, e a chave gravada deixaria de ser a que o provedor reenvia depois. Identificadores textuais são normalizados em NFC e recusam caracteres de controle, porque a mesma identidade em duas normalizações viraria duas transações, e um byte nulo chega ao PostgreSQL como violação de protocolo, que é indistinguível de indisponibilidade.
+
 A frase “mesma resposta” é interpretada como o mesmo resultado de negócio: transactionId, status, failureCode e resultBalance históricos. No contrato HTTP, resultBalance é serializado no campo balance. Não significa resposta HTTP byte a byte. 201 informa que aquela requisição criou o recurso; um replay processado usa 200 e idempotentReplay=true. Rejeição permanece 422 e pending permanece 202.
 
 Erros de contrato usam envelope error com code estável, mensagem segura, details opcionais e correlationId. Resultados de negócio usam o recurso, inclusive em 422. Corpos de erro e logs não incluem payload financeiro completo.
@@ -514,7 +521,7 @@ O cursor do ledger é base64url opaco de createdAt+id. A busca usa keyset por (c
 
 A página de ledger tem items, nextCursor e hasMore. As consultas de Wager devolvem uma TransactionView com status, failureCode e resultBalance persistidos.
 
-GET /health/live verifica somente processo. GET /health/ready verifica PostgreSQL e SQS separadamente e retorna 200 ou 503. Ambos são públicos.
+GET /health/live verifica somente processo. GET /health/ready verifica PostgreSQL e SQS separadamente e retorna 200 ou 503, com `status` e `latencyMs` por dependência. A mensagem do driver não entra na resposta: o README §9 exige o endpoint sem autenticação, e um erro de conexão do PostgreSQL nomeia role e host. Ela vai para o log. Ambos são públicos.
 
 ## 11. Reconciliação
 

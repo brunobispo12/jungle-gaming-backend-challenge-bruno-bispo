@@ -193,15 +193,9 @@ export class SubmitWagerTransactionUseCase {
     }
 
     const direction = transaction.ledgerDirectionFor();
-    if (direction === LedgerDirection.Debit && !wallet.canDebit(transaction.money)) {
-      return this.reject(
-        repositories,
-        transaction,
-        transaction.overdraftFailureCode(),
-        wallet.balance,
-        now,
-        context,
-      );
+    const rejection = movementFailure(wallet, transaction, direction);
+    if (rejection) {
+      return this.reject(repositories, transaction, rejection, wallet.balance, now, context);
     }
 
     const entry = this.move(wallet, transaction, direction, now);
@@ -289,15 +283,9 @@ export class SubmitWagerTransactionUseCase {
     }
 
     const direction = transaction.ledgerDirectionFor(reference);
-    if (direction === LedgerDirection.Debit && !wallet.canDebit(transaction.money)) {
-      return this.reject(
-        repositories,
-        transaction,
-        transaction.overdraftFailureCode(),
-        wallet.balance,
-        now,
-        context,
-      );
+    const rejection = movementFailure(wallet, transaction, direction);
+    if (rejection) {
+      return this.reject(repositories, transaction, rejection, wallet.balance, now, context);
     }
 
     const entry = this.move(wallet, transaction, direction, now);
@@ -365,6 +353,17 @@ export class SubmitWagerTransactionUseCase {
     await repositories.outbox.enqueue([WagerTransactionRejected.from(transaction, context)], now);
     return resultOf(transaction, false);
   }
+}
+
+function movementFailure(
+  wallet: Wallet,
+  transaction: WagerTransaction,
+  direction: LedgerDirection,
+): FailureCode | undefined {
+  if (direction === LedgerDirection.Debit) {
+    return wallet.canDebit(transaction.money) ? undefined : transaction.overdraftFailureCode();
+  }
+  return wallet.canCredit(transaction.money) ? undefined : FailureCode.BalanceLimitExceeded;
 }
 
 // A transaction pointing at itself never settles: waiting would wait forever.

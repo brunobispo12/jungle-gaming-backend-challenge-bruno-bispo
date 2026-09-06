@@ -1,6 +1,6 @@
 import type { SQL } from 'bun';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 import type { CreateWalletUseCase } from '@/application/use-cases/create-wallet';
 import { JsonLogger, type LogFields, type LogLevel } from '@/infrastructure/observability/json-logger';
@@ -62,6 +62,10 @@ const touched: string[] = [];
 afterEach(async () => {
   await expectWalletsMatchLedger(sql, touched.splice(0));
 });
+
+function fakeRequest(): Request {
+  return { rawHeaders: ['Idempotency-Key', 'key'] } as unknown as Request;
+}
 
 function fakeResponse(correlationId: string = crypto.randomUUID()): Response {
   return {
@@ -151,6 +155,7 @@ describe('TST-045 logs estruturados sem payload financeiro', () => {
       body,
       `provider-a:${body['externalTransactionId'] as string}`,
       undefined,
+      fakeRequest(),
       fakeResponse(),
     );
 
@@ -179,6 +184,7 @@ describe('TST-045 logs estruturados sem payload financeiro', () => {
       applied,
       `provider-a:${applied['externalTransactionId'] as string}`,
       undefined,
+      fakeRequest(),
       fakeResponse(),
     );
 
@@ -187,6 +193,7 @@ describe('TST-045 logs estruturados sem payload financeiro', () => {
       rejected,
       `provider-a:${rejected['externalTransactionId'] as string}`,
       undefined,
+      fakeRequest(),
       fakeResponse(),
     );
 

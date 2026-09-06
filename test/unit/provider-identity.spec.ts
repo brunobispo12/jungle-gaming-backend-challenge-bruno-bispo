@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 import type { ProviderIdentityPort, UnitOfWork } from '@/application/ports';
 import type { CreateWalletUseCase } from '@/application/use-cases/create-wallet';
@@ -23,6 +23,10 @@ const BODY = {
   kind: 'BET',
   money: { amount: '25.00', currency: 'BRL' },
 };
+
+function fakeRequest(): Request {
+  return { rawHeaders: ['Idempotency-Key', 'key'] } as unknown as Request;
+}
 
 function fakeResponse(): Response {
   return {
@@ -86,7 +90,7 @@ describe('ProviderIdentityPort no caminho da submissão', () => {
     };
     const { controller, submitted } = controllerWith(rewriting);
 
-    await controller.postWager(BODY, 'provider-declared:transaction-123', undefined, fakeResponse());
+    await controller.postWager(BODY, 'provider-declared:transaction-123', undefined, fakeRequest(), fakeResponse());
 
     expect(submitted).toHaveLength(1);
     expect(submitted[0]?.providerId).toBe('provider-resolved');
@@ -107,6 +111,7 @@ describe('ProviderIdentityPort no caminho da submissão', () => {
       BODY,
       'provider-declared:transaction-123',
       'Bearer token-123',
+      fakeRequest(),
       fakeResponse(),
     );
 

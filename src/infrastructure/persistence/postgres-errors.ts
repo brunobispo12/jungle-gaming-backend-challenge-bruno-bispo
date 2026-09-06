@@ -16,7 +16,15 @@ const LOCK_CONFLICT_REASONS: Readonly<Record<string, 'lock_timeout' | 'deadlock'
   '40P01': 'deadlock',
 };
 
-const CONNECTION_EXCEPTION_CLASS = '08';
+// Not the whole class 08: 08P01 is protocol_violation, which no resend can fix.
+const TRANSIENT_CONNECTION_STATES = new Set([
+  '08000',
+  '08001',
+  '08003',
+  '08004',
+  '08006',
+  '08007',
+]);
 
 // A socket that dies mid query never reaches PostgreSQL's error protocol, so it
 // arrives with a libuv code or with nothing but a message. Classifying it as
@@ -85,7 +93,7 @@ function findInCauseChain<T>(
 export function isTransientDatabaseFailure(error: unknown): boolean {
   const bySqlState =
     findInCauseChain(error, (state) =>
-      TRANSIENT_SQLSTATES.has(state) || state.startsWith(CONNECTION_EXCEPTION_CLASS)
+      TRANSIENT_SQLSTATES.has(state) || TRANSIENT_CONNECTION_STATES.has(state)
         ? true
         : undefined,
     ) ?? false;

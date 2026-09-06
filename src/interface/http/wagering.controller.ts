@@ -9,10 +9,11 @@ import {
   Param,
   Post,
   Query,
+  Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 
 import { ApplicationError, ErrorCode } from '@/application/errors';
 import type { ProviderIdentityPort, UnitOfWork } from '@/application/ports';
@@ -187,9 +188,10 @@ export class WageringController {
     @Body() body: unknown,
     @Headers('idempotency-key') idempotencyKey: string | undefined,
     @Headers('authorization') authorization: string | undefined,
+    @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ): Promise<unknown> {
-    const key = requireIdempotencyKey(idempotencyKey);
+    const key = requireIdempotencyKey(idempotencyKey, countHeader(request, 'idempotency-key'));
     const parsed = parseSubmitWager(body);
     const context = requestContextOf(response);
     const identity = await this.providerIdentity.resolve({ authorization }, parsed.providerId);
@@ -241,6 +243,17 @@ export class WageringController {
     );
     return transactionView(mustExist(found));
   }
+}
+
+function countHeader(request: Request, name: string): number {
+  const raw = request.rawHeaders;
+  let seen = 0;
+  for (let index = 0; index < raw.length; index += 2) {
+    if (raw[index]?.toLowerCase() === name) {
+      seen += 1;
+    }
+  }
+  return seen;
 }
 
 function mustExist(transaction: WagerTransaction | undefined): WagerTransaction {

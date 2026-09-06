@@ -380,6 +380,20 @@ describe('API HTTP contra PostgreSQL real', () => {
     );
   });
 
+  test('readiness informa o estado da dependência sem devolver a mensagem do driver', async () => {
+    const response = await fetch(`${baseUrl}/health/ready`);
+    const report = (await response.json()) as {
+      status: string;
+      checks: Record<string, Record<string, unknown>>;
+    };
+
+    expect(response.status).toBe(200);
+    expect(Object.keys(report.checks).sort()).toEqual(['postgres', 'sqs']);
+    for (const check of Object.values(report.checks)) {
+      expect(Object.keys(check).sort()).toEqual(['latencyMs', 'status']);
+    }
+  });
+
   test('expõe as métricas operacionais obrigatórias no formato Prometheus', async () => {
     const response = await fetch(`${baseUrl}/metrics`);
     const exposition = await response.text();

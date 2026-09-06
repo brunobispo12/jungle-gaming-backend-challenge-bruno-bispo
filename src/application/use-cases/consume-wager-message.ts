@@ -6,6 +6,7 @@ import {
   type Repositories,
   type UnitOfWork,
 } from '@/application/ports';
+import { DomainError } from '@/domain/domain-error';
 import type {
   SubmitWagerCommand,
   SubmitWagerResult,
@@ -124,6 +125,10 @@ export class ConsumeWagerMessageUseCase {
       return PERMANENT_CODES.has(error.code)
         ? { kind: 'permanent', reason: `${error.code}: ${error.message}` }
         : { kind: 'transient', reason: `${error.code}: ${error.message}` };
+    }
+
+    if (error instanceof DomainError) {
+      return { kind: 'permanent', reason: `${error.name}: ${error.message}` };
     }
 
     return { kind: 'transient', reason: messageOf(error) };

@@ -1,6 +1,7 @@
 export const FailureCode = {
   InsufficientFunds: 'INSUFFICIENT_FUNDS',
   ReversalWouldOverdraw: 'REVERSAL_WOULD_OVERDRAW',
+  BalanceLimitExceeded: 'BALANCE_LIMIT_EXCEEDED',
   ReferenceNotFound: 'REFERENCE_NOT_FOUND',
   ReferenceNotProcessed: 'REFERENCE_NOT_PROCESSED',
   ReferenceKindNotReversible: 'REFERENCE_KIND_NOT_REVERSIBLE',

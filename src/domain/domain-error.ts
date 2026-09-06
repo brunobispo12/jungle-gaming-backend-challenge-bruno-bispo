@@ -39,11 +39,8 @@ export class InvalidTransactionStateError extends DomainError {
 }
 
 export class InvalidTimestampError extends DomainError {
-  constructor(
-    readonly at: Date,
-    readonly notBefore: Date,
-  ) {
-    super(`timestamp ${at.toISOString()} is earlier than ${notBefore.toISOString()}`);
+  constructor(readonly at: Date) {
+    super(`timestamp is not a usable instant: ${at.getTime()}`);
   }
 }
 
