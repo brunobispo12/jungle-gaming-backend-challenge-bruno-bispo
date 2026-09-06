@@ -112,8 +112,8 @@ credencial de migration.
 
 ```bash
 bun run typecheck         # TypeScript strict, sem emitir
-bun run test              # 189 casos: unidade do domínio e harness de carga, sem container
-bun run test:integration  # 150 casos contra PostgreSQL e LocalStack reais
+bun run test              # 193 casos: unidade do domínio e harness de carga, sem container
+bun run test:integration  # 172 casos contra PostgreSQL e LocalStack reais
 bun run test:concurrency  # 11 cenários com três processos reais em paralelo
 bun run test:load         # k6: cinco perfis com verificação financeira em SQL
 ```
