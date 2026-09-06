@@ -23,7 +23,7 @@ A ordem de prioridade é: exatidão de Money, atomicidade, idempotência, concor
 
 Ficam fora desta entrega autenticação funcional, double-entry bookkeeping, correção automática de divergências, exactly-once e ordenação global de eventos. Também não entram CQRS, CommandBus, repositórios genéricos, ClickHouse nem dashboards elaborados. OpenTelemetry permanece não implementado; observabilidade é logs JSON em stdout e métricas Prometheus. O diferencial opcional de carga do README §14 é executável por `bun run test:load`.
 
-`ProviderIdentityPort` é o único ponto de extensão de autenticação, hoje implementado por `TrustedProviderIdentityAdapter`, que aceita a identidade declarada porque nenhum Identity Provider está ligado. O port fica no caminho real de `POST /wagering/transactions`: o controller resolve a identidade antes de submeter, e é o `providerId` resolvido que entra no comando e no `payloadHash`. Uma evolução troca só o adapter, por um que faça introspecção de OAuth2 client credentials e valide o `provider_id` do token contra o corpo. Health checks continuam públicos; a entrada SQS não passa pelo port — a fila é canal interno (README §2), e seus dados continuam sujeitos às mesmas validações de domínio.
+`ProviderIdentityPort` é o único ponto de extensão de autenticação, hoje implementado por `TrustedProviderIdentityAdapter`, que aceita a identidade declarada porque nenhum Identity Provider está ligado. O port fica no caminho real de `POST /wagering/transactions`: o controller resolve a identidade antes de submeter, e é o `providerId` resolvido que entra no comando e no `payloadHash`. Uma evolução troca só o adapter, por um que faça introspecção de OAuth2 client credentials e valide o `provider_id` do token contra o corpo. Health checks continuam públicos. A entrada SQS não passa pelo port porque a fila é canal interno (README §2); seus dados continuam sujeitos às mesmas validações de domínio.
 
 ## 2. Topologia
 
@@ -49,7 +49,7 @@ O mesmo caso de uso financeiro é chamado pelas duas entradas:
 
 Um único binário suporta os papéis api, consumer, pending-worker e outbox-publisher por `APP_ROLES`. Docker Compose inicia três processos com todos os papéis. O desenho é multi-instance; nenhum papel precisa ser singleton: Inbox, unique indexes, row locks, SKIP LOCKED e leases coordenam instâncias concorrentes.
 
-Todo processo abre a porta HTTP, qualquer que seja o papel, porque `/health/live`, `/health/ready` e `/metrics` precisam ser alcançáveis também num consumer ou num publisher — métricas que ninguém consegue raspar não são observabilidade. O papel `api` não decide mais se há porta, e sim se a API de negócio é servida: sem ele, `ApiRoleGuard` responde 404 em `/wallets` e `/wagering/transactions`, e a superfície operacional continua respondendo. Cada processo tem a sua `PORT`.
+Todo processo abre a porta HTTP, qualquer que seja o papel, porque `/health/live`, `/health/ready` e `/metrics` precisam ser alcançáveis também num consumer ou num publisher; métricas que ninguém consegue raspar não são observabilidade. O papel `api` não decide se há porta, e sim se a API de negócio é servida. Sem ele, `ApiRoleGuard` responde 404 em `/wallets` e `/wagering/transactions`, e a superfície operacional continua respondendo. Cada processo tem a sua `PORT`.
 
 A indisponibilidade de um papel afeta disponibilidade ou latência, não muda a regra de correção. O estado necessário para recuperar trabalho fica no PostgreSQL ou no SQS, nunca apenas em memória do processo.
 
@@ -59,7 +59,7 @@ O código é separado em domain, application, infrastructure, interface e bootst
 
 As classes de domínio têm construtor privado ou protegido e estado encapsulado. Factories como create/from validam uma criação ou transição nova; rehydrate apenas recompõe o estado já validado e persistido, sem repetir regras de transição. Não há setters públicos para contornar Wallet, WagerTransaction ou WalletLedgerEntry.
 
-O README §6.5 esboça InboxMessage e OutboxMessage como classes com transições próprias, e aqui elas não existem: InboxMessage é o DTO de InboxRepository e a linha da outbox é escrita por OutboxRepository.enqueue e drenada por OutboxClaimRepository. A decisão é deliberada e vale só para essas duas. O que essas classes encapsulariam — elegibilidade, backoff, posse de um item — é justamente o que precisa ser decidido dentro da consulta para continuar correto com vários publishers: a elegibilidade é a cláusula WHERE do claim sob FOR UPDATE SKIP LOCKED, a posse é a condição `claimed_by = :publisherId` que toda escrita seguinte carrega, e o incremento de tentativa é `attempts + 1` no próprio UPDATE. Um agregado em memória reescreveria essas condições em TypeScript, onde elas não têm efeito sobre a corrida, e a linha ainda precisaria confiar no SQL. As duas garantias ficam no schema: PRIMARY KEY (consumer_name, message_id) na inbox e a posse verificada em toda transição da outbox, ambas cobertas por teste de integração.
+O README §6.5 esboça InboxMessage e OutboxMessage como classes com transições próprias. Aqui elas não existem. InboxMessage é o DTO de InboxRepository; a linha da outbox é escrita por OutboxRepository.enqueue e drenada por OutboxClaimRepository. A escolha vale só para essas duas. Elegibilidade, backoff e posse de um item são decididos no SQL do claim, porque é lá que a corrida entre publishers acontece: a elegibilidade é a cláusula WHERE sob FOR UPDATE SKIP LOCKED, a posse é a condição `claimed_by = :publisherId` em toda escrita seguinte, e o incremento de tentativa é `attempts + 1` no próprio UPDATE. Uma classe em memória repetiria essas condições em TypeScript sem efeito sobre a corrida, e a linha continuaria dependendo do SQL. As duas garantias ficam no schema: PRIMARY KEY (consumer_name, message_id) na inbox e a posse verificada em toda transição da outbox. Ambas têm teste de integração.
 
 ### 3.1 Money sem ponto flutuante
 
@@ -100,9 +100,9 @@ Transições permitidas:
 
 PROCESSED, REJECTED e FAILED são terminais. processedAt existe exatamente nesses estados. Um trigger rejeita UPDATE ou DELETE de uma linha que já estava terminal.
 
-FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED — a classificação reconhece tanto o SQLSTATE quanto a perda de socket que chega sem SQLSTATE algum, porque tratar um blip de rede como determinístico terminalizaria uma pendência legítima.
+FAILED tem uso restrito: somente uma falha determinística e permanente ao processar uma PENDING_REFERENCE já persistida, com PostgreSQL funcional. Timeout, deadlock, conexão caída ou SQS indisponível são transitórios e não geram FAILED. A classificação reconhece o SQLSTATE e também a perda de socket que chega sem SQLSTATE, porque tratar uma queda de rede como determinística encerraria uma pendência legítima.
 
-FAILED não tem evento próprio: publica `WagerTransactionRejected` com `failureCode = INFRASTRUCTURE_FAILURE`, que é o que distingue esse caso de uma recusa por regra de negócio no mesmo tipo de evento. A alternativa seria um quinto tipo de evento fora dos quatro mínimos do README §11, e o `failureCode` já resolve para o consumidor.
+FAILED não tem evento próprio. Publica `WagerTransactionRejected` com `failureCode = INFRASTRUCTURE_FAILURE`, e esse código distingue o caso de uma recusa por regra de negócio no mesmo tipo de evento. Um quinto tipo de evento, fora dos quatro mínimos do README §11, não acrescentaria informação que o `failureCode` já dá ao consumidor.
 
 ### 3.4 Efeito financeiro por kind
 
@@ -115,9 +115,11 @@ FAILED não tem evento próprio: publica `WagerTransactionRejected` com `failure
 | REFUND | crédito | CREDIT | reverte BET PROCESSED |
 | ROLLBACK | inverso da referência | direção invertida | reverte BET, WIN ou REFUND PROCESSED |
 
-OPENING usa providerId internal, externalTransactionId opening:<walletId>, idempotencyKey internal:opening:<walletId>, roundId/gameId internal e hash canônico. O provider internal é inválido nas entradas externas, mas continua consultável por `GET /providers/internal/wagering/transactions/opening:<walletId>`: esconder o OPENING deixaria o histórico da Wallet incompleto. Saldo inicial zero cria somente a Wallet; saldo positivo cria OPENING, ledger e eventos na mesma transação. A Wallet continua observável com version 1.
+OPENING usa providerId internal, externalTransactionId opening:<walletId>, idempotencyKey internal:opening:<walletId>, roundId/gameId internal e hash canônico. O provider internal é inválido nas entradas externas, mas continua consultável por `GET /providers/internal/wagering/transactions/opening:<walletId>`, porque esconder o OPENING deixaria o histórico da Wallet incompleto. Saldo inicial zero cria somente a Wallet; saldo positivo cria OPENING, ledger e eventos na mesma transação. A Wallet continua observável com version 1.
 
 WIN não exige referência. Se uma referência opcional é resolvida, ela é validada. Se o identificador opcional ainda não existe, o WIN é processado sem vínculo interno. Não há log ou métrica específicos para essa escolha.
+
+A alternativa seria tratar WIN como REFUND e ROLLBACK, segurando-o em PENDING_REFERENCE até o BET aparecer. Rejeitei por duas razões. O README §7 regra 3 lista a exigência de referência apenas para REFUND e ROLLBACK, e nada obriga o provedor a informar o BET num WIN. E o efeito prático seria atrasar um crédito devido ao jogador por causa de um campo opcional: um WIN sem referência resolvida é um crédito válido, enquanto um REFUND sem referência é uma reversão que não sabe o que reverte. As duas situações não merecem o mesmo tratamento.
 
 ### 3.5 Reversões — opção B
 
@@ -138,7 +140,7 @@ A constraint correspondente é:
     WHERE status = 'PROCESSED'
       AND kind IN ('REFUND', 'ROLLBACK')
 
-Portanto, BET → REFUND(BET) → ROLLBACK(BET) é aceito e pode gerar dois créditos. Essa consequência é mantida explícita porque é o custo da leitura textualmente mais próxima do enunciado. Não há cascata: reverter REFUND não reabre BET, e reverter BET não altera WIN.
+Portanto, BET → REFUND(BET) → ROLLBACK(BET) é aceito e pode gerar dois créditos. Registro essa consequência porque ela é o custo da leitura mais próxima do texto do enunciado. Não há cascata: reverter REFUND não reabre BET, e reverter BET não altera WIN.
 
 ### 3.6 FailureCode
 
@@ -153,11 +155,17 @@ FailureCode é resultado persistido de negócio ou de FAILED; ErrorCode pertence
 | Wallet | WALLET_NOT_FOUND; WALLET_PLAYER_MISMATCH |
 | Falha terminal do pending worker | INFRASTRUCTURE_FAILURE |
 
+A granularidade da taxonomia segue o critério do README §7.2: cada código precisa bastar para o provedor decidir entre reenviar, corrigir o payload ou desistir. Os grupos seguem essas três saídas. Saldo é situação de estado, e reenviar mais tarde pode funcionar. Referência ausente ou ainda não processada é questão de tempo e ordem, e a espera é do sistema, não do provedor. Referência incompatível, moeda e Wallet são defeito de payload, e reenviar o mesmo corpo nunca vai passar. INFRASTRUCTURE_FAILURE é o único que não fala sobre a operação enviada. Com um código a menos, o provedor teria que ler a mensagem de texto para decidir; com um código a mais por variação de mensagem, a taxonomia ficaria instável entre versões.
+
 Os dois códigos de saldo são separados porque uma BET sem fundos e uma reversão que causaria saldo negativo pedem diagnósticos diferentes. OPENING recebido por HTTP ou SQS é erro de contrato e falha antes da reserva da Wager. Os demais erros de protocolo usam ErrorCode estável conforme a matriz HTTP e nunca são persistidos como resultado financeiro.
 
 ## 4. PostgreSQL: schema e invariantes
 
 Escolhi MikroORM porque seu Unit of Work, Identity Map e suporte a transações/locks deixam explícita a fronteira que importa neste desafio. EntitySchema mapeia persistence rows POJO; mappers dedicados fazem domínio ↔ persistência. Assim Money, Wallet e WagerTransaction não recebem decorators do ORM ou do NestJS. Cada requisição, mensagem ou iteração de worker usa um EntityManager forkado.
+
+TypeORM é aceito pelo README §4 e daria conta do schema. A escolha se decidiu por três pontos. Primeiro, o mapeamento: `EntitySchema` descreve linhas POJO num arquivo separado, enquanto o caminho idiomático do TypeORM são decorators na própria classe, e a classe que eu não quero decorar é a de domínio. Segundo, a fronteira transacional: `em.fork()` por unidade de trabalho mostra qual EntityManager pertence a qual transação, e `getTransactionContext()` deixa explícito quando SQL textual está dentro dela. Com um manager compartilhado é fácil escrever, sem perceber, uma escrita fora da transação que deveria contê-la. Terceiro, o vocabulário de lock: `LockMode.PESSIMISTIC_WRITE` e `LockMode.PESSIMISTIC_PARTIAL_WRITE` correspondem a `FOR UPDATE` e `FOR UPDATE SKIP LOCKED`, as duas primitivas de que este desenho depende, na Wallet e no claim da Outbox. Nada disso é impossível no TypeORM. A diferença é quanto do desenho fica legível no código sem comentário.
+
+As migrations são duas. A inicial cria o schema inteiro. A segunda troca a ordenação de `outbox_pending_ix` e existe em vez de uma edição da primeira porque o `down` precisa devolver o índice anterior; só assim a reversibilidade é verificável em vez de afirmada. O teste de migrations exerce as duas direções e compara `indexdef`. Editar a inicial daria o mesmo schema final e nenhuma prova de que uma versão sabe voltar.
 
 Reservas com ON CONFLICT, row locks e claims podem usar QueryBuilder ou SQL encapsulado nos repositórios quando a operação precisa acontecer imediatamente, sem depender do flush tardio do Unit of Work. O custo é algum código de mapeamento, aceito para não acoplar as invariantes do domínio ao formato das tabelas.
 
@@ -186,11 +194,11 @@ A igualdade entre Wallet.balance e a soma do ledger atravessa linhas e tabelas, 
 
 A reversão de uma migration é operação sobre schema, não um caminho runtime para apagar ledger. A role da aplicação não recebe DELETE nas tabelas financeiras/auditáveis e só atualiza as colunas mutáveis de cada lifecycle. Em wallet_ledger_entry, não recebe UPDATE, DELETE nem TRUNCATE; manutenção destrutiva exige a credencial separada de migration/operação.
 
-IDs de Wallet, WagerTransaction, WalletLedgerEntry, outbox_message e eventId são UUID v7 gerados por IdGenerator. O desenho usa sua unicidade, não supõe ordem temporal pelo UUID.
+IDs de Wallet, WagerTransaction, WalletLedgerEntry, outbox_message e eventId são UUID v7 gerados por IdGenerator. Escolhi v7 em vez de v4 por causa do índice: o prefixo temporal dá localidade de inserção no B-tree, enquanto chaves aleatórias espalhariam cada INSERT por páginas distintas das tabelas mais escritas. O desenho usa só a unicidade. A paginação do ledger é keyset por `(created_at, id)` para não depender da ordenação do UUID, e nenhuma regra financeira lê tempo a partir de um ID.
 
 ## 5. Fronteira transacional e concorrência
 
-Operações financeiras normais usam READ COMMITTED. Esse nível permite que uma nova consulta após o INSERT concorrente veja a transação vencedora, enquanto o row lock da Wallet serializa o saldo. Em READ COMMITTED o próprio `SELECT … FOR UPDATE` reavalia a linha quando o bloqueio termina e devolve a versão que a vencedora commitou: por isso, no cenário obrigatório, a segunda BET lê `20.00` e não os `100.00` visíveis no início da sua transação. É esse comportamento — não a coluna `version` — que elimina o lost update.
+Operações financeiras normais usam READ COMMITTED. Esse nível permite que uma nova consulta após o INSERT concorrente veja a transação vencedora, enquanto o row lock da Wallet serializa o saldo. Em READ COMMITTED o próprio `SELECT … FOR UPDATE` reavalia a linha quando o bloqueio termina e devolve a versão que a vencedora commitou. Por isso, no cenário obrigatório, a segunda BET lê `20.00` e não os `100.00` visíveis no início da sua transação. Esse comportamento do `FOR UPDATE` é o que elimina o lost update; a coluna `version` não participa disso.
 
 Escolhi lock pessimista porque o cenário central é contenção sobre um saldo mutável. Dentro da transação, a implementação executa um único SELECT … FOR UPDATE bloqueante na Wallet. Não há probe não bloqueante seguido de retry, nem comparação otimista por version.
 
@@ -246,6 +254,8 @@ O business payloadHash é SHA-256 hexadecimal de JSON canônico, com chaves orde
 
 Idempotency-Key e metadados de transporte não participam. Assim HTTP e SQS produzem o mesmo hash para o mesmo fato.
 
+Duas escolhas do algoritmo canônico precisam de explicação. A ordenação é por code unit UTF-16, o `sort()` sem comparador, e não por `localeCompare`. A ordem precisa ser a mesma em qualquer runtime e qualquer locale; um hash que dependesse da configuração da máquina transformaria replay em conflito depois de um deploy. Campo ausente é omitido em vez de serializado como `null`. Assim, um cliente que manda `referenceExternalTransactionId: null` e outro que não manda o campo produzem o mesmo hash para o mesmo fato. Sem isso, o mesmo BET enviado por dois clientes com serializadores diferentes seria tratado como conflito de idempotência.
+
 ### 6.2 Algoritmo da primeira submissão
 
 1. Validar o contrato e normalizar Money na fronteira; calcular payloadHash no caso de uso.
@@ -265,7 +275,9 @@ Idempotency-Key e metadados de transporte não participam. Assim HTTP e SQS prod
 
 O INSERT concorrente espera a decisão da unique index. Se a vencedora commitar, a consulta seguinte a enxerga; se abortar, uma concorrente assume a inserção. Em 50 requisições idênticas, uma única transação toca a Wallet.
 
-Corridas esperadas não usam SQLSTATE 23505 como controle normal: as reservas de Wager e Wallet usam `ON CONFLICT DO NOTHING`. Uma violação residual de constraint aborta a transação e segue como erro interno seguro; não existe classificador genérico por `constraint_name` nem subsistema de alerting nesta entrega.
+Reservo a identidade antes de travar a Wallet, e a ordem não é intercambiável. A unique index de idempotência é o ponto de serialização mais barato disponível. Se a Wallet fosse travada primeiro, as 50 requisições disputariam o mesmo row lock e 49 descobririam depois que eram replay; trabalho descartável viraria contenção sobre o recurso mais concorrido do sistema. Com a identidade reservada antes, 49 nunca chegam ao lock.
+
+Corridas esperadas não usam SQLSTATE 23505 como controle normal; as reservas de Wager e Wallet usam `ON CONFLICT DO NOTHING`. A razão está no PostgreSQL: uma violação de constraint aborta a transação inteira, e continuar depois dela exigiria um SAVEPOINT por tentativa para tratar o caso mais comum do fluxo. `ON CONFLICT` resolve a corrida sem abortar a transação, e o `RETURNING` distingue ganho de conflito na mesma ida ao banco. Uma violação residual de constraint segue como erro interno seguro. Não existe classificador genérico por `constraint_name` nem subsistema de alerting nesta entrega.
 
 ### 6.3 Resultado histórico
 
@@ -437,11 +449,11 @@ IntegrationEvent<T> é uma classe abstrata que concentra eventId, aggregateId, c
 
 Os payloads usam MoneyProps, nunca a instância Money. Cada tipo começa em version 1; mudança aditiva preserva versão e mudança incompatível cria nova versão coexistente.
 
-HTTP usa X-Correlation-Id válido ou gera um; causationId é o request ID. SQS deriva correlationId deterministicamente de consumerName+messageId e usa messageId como causationId. O pending worker herda o correlationId persistido.
+HTTP usa X-Correlation-Id válido ou gera um; causationId é o request ID. SQS deriva correlationId deterministicamente de consumerName+messageId e usa messageId como causationId. A derivação é determinística porque uma redelivery da mesma mensagem precisa produzir o mesmo correlationId. Se não fosse, a segunda entrega abriria um rastro novo, e o diagnóstico de uma duplicação, que é o caso que mais interessa investigar aqui, ficaria dividido em dois. O pending worker herda o correlationId persistido pelo mesmo motivo: a resolução que acontece horas depois pertence ao mesmo fato.
 
 ## 10. Contrato HTTP
 
-O contrato distingue erro de protocolo de resultado de negócio:
+O contrato distingue erro de protocolo de resultado de negócio. O critério da tabela abaixo é o do README §9: o que o provedor deve fazer ao receber cada resposta. Cada faixa responde uma coisa diferente, e por isso elas não colapsam num código só. 400, 413 e 415 dizem que o corpo não é aceitável e que reenviá-lo igual nunca vai funcionar. 409 diz que a identidade enviada conflita com algo já registrado; o que precisa mudar é a chave, não o corpo. 422 diz que o payload é válido e foi entendido, mas uma regra de negócio recusou; o resultado está persistido e auditável, e reenviar produz a mesma recusa. Por isso não é 400. 202 diz que a operação foi aceita e a resposta final virá; o provedor deve consultar em vez de reenviar. 503 é o único que significa "reenvie isto depois", e vem com `Retry-After`. 500 diz que houve falha do nosso lado que reenviar não resolve sozinho.
 
 | Resultado | HTTP | Persistência |
 |---|---:|---|
@@ -510,7 +522,7 @@ Dois sinais são entregues, e respondem a perguntas diferentes:
 |---|---|---|
 | JSON logs em stdout | eventos discretos e erros classificados | entregue |
 | Prometheus em `GET /metrics` | comportamento agregado para monitoramento externo | entregue |
-| OpenTelemetry traces | caminho e latência de uma execução individual | opcional pelo README §12, **não implementado** |
+| OpenTelemetry traces | caminho e latência de uma execução individual | opcional pelo README §12, não implementado |
 
 Logs carregam `correlationId` e, quando existem, `messageId`, `brokerMessageId`, `transactionId`, `walletId`, `providerId`, `kind`, `status` e `idempotentReplay`. `messageId` é o ID autoral do envelope e `brokerMessageId` é o identificador entregue pelo SQS. Payload financeiro completo, `amount`, `balance`, credenciais e dados sensíveis ficam de fora; o teste de logging em `test/integration/logging.spec.ts` percorre objetos e arrays recursivamente, rejeita chaves proibidas em qualquer profundidade e também verifica os valores movimentados, inclusive numa divergência real de reconciliação.
 
@@ -518,7 +530,7 @@ Os três identificadores de correlação têm papéis distintos: `correlationId`
 
 ### 12.1 Métricas expostas
 
-`GET /metrics` responde com o `contentType` do `Registry` próprio da aplicação — nunca o registry default do `prom-client`, e sem `collectDefaultMetrics()`. O endpoint é fino: lê o registry e devolve o texto.
+`GET /metrics` responde com o `contentType` do `Registry` próprio da aplicação, não do registry default do `prom-client`, e sem `collectDefaultMetrics()`. O endpoint só lê o registry e devolve o texto.
 
 | Métrica | Tipo | Labels |
 |---|---|---|
@@ -540,9 +552,9 @@ Os três identificadores de correlação têm papéis distintos: `correlationId`
 
 Todas as labels declaradas têm conjunto fechado. Nenhuma carrega `walletId`, `transactionId`, `providerId`, `messageId`, `correlationId`, `externalTransactionId`, `idempotencyKey` ou qualquer outro identificador: `reason` e `outcome` recebem categorias controladas dos call sites atuais, e `route` é o padrão de rota casado pelo Express, jamais a URL concreta. O teste unitário exercita todas as famílias e sua exposição, mas não promete detectar genericamente qualquer label nova de alta cardinalidade.
 
-`wallet_lock_wait_seconds` observa **toda** tentativa de adquirir o `FOR UPDATE` da Wallet, inclusive a que termina em erro, sem limiar arbitrário de "contenção": uma espera longa e bem-sucedida fica na distribuição do histograma. `wallet_lock_conflicts_total` só incrementa quando o PostgreSQL recusou a aquisição, classificado por SQLSTATE — `55P03` é `lock_timeout` e `40P01` é `deadlock`.
+`wallet_lock_wait_seconds` observa toda tentativa de adquirir o `FOR UPDATE` da Wallet, inclusive a que termina em erro, sem limiar arbitrário de "contenção"; uma espera longa e bem-sucedida fica na distribuição do histograma. `wallet_lock_conflicts_total` só incrementa quando o PostgreSQL recusou a aquisição, classificado por SQLSTATE: `55P03` é `lock_timeout` e `40P01` é `deadlock`.
 
-Os três Gauges descrevem o último estado coletado e por isso não são lidos no scrape. Um coletor em background, `OperationalMetricsCollector`, inicia uma coleta ao subir e, depois, roda em todo processo a cada 15 s; consulta a outbox no PostgreSQL e a DLQ por `GetQueueAttributes` e escreve os valores no registry. Ler isso dentro do `collect()` do `prom-client` faria `GET /metrics` esperar por PostgreSQL e SQS naquele instante. Se uma coleta falha, o erro é logado, `/metrics` continua disponível e preserva a última amostra bem-sucedida; a freshness fica sem limite até a dependência voltar. Como os três Gauges são fatos globais reportados por todas as instâncias, a leitura correta em PromQL é `max by (...)`.
+Os três Gauges descrevem o último estado coletado e não são lidos no scrape. Um coletor em background, `OperationalMetricsCollector`, inicia uma coleta ao subir e, depois, roda em todo processo a cada 15 s; consulta a outbox no PostgreSQL e a DLQ por `GetQueueAttributes` e escreve os valores no registry. Ler isso dentro do `collect()` do `prom-client` faria `GET /metrics` esperar por PostgreSQL e SQS naquele instante. Se uma coleta falha, o erro é logado, `/metrics` continua disponível e preserva a última amostra bem-sucedida; a freshness fica sem limite até a dependência voltar. Como os três Gauges são fatos globais reportados por todas as instâncias, a leitura correta em PromQL é `max by (...)`.
 
 O contador de reconciliação existe porque o README §9 exige que divergência seja contabilizada em métrica, além de logada e sinalizada na resposta. Nada nesse caminho corrige saldo.
 
@@ -550,13 +562,63 @@ Liveness não consulta dependências. Readiness diferencia PostgreSQL e SQS para
 
 Ficam fora desta entrega, todos opcionais pelo README §12: OpenTelemetry e propagação de trace context, Collector, backend de traces, exemplars e dashboard. Nenhuma garantia financeira, de Inbox, ACK, lock ou Outbox depende de telemetria.
 
-## 13. Estratégia de testes
+## 13. Parâmetros operacionais
+
+O README §7.1 exige que limite de tentativas e TTL sejam justificados, e o mesmo padrão vale para os outros números que governam espera, retry e desligamento. Nenhum deles é default de biblioteca. Vários existem em par, e mudar um sozinho quebra a relação que o torna correto; a última coluna registra essa relação.
+
+### 13.1 Lock de Wallet
+
+| Parâmetro | Valor | Por que este valor | Relação a preservar |
+|---|---|---|---|
+| `WALLET_LOCK_TIMEOUT_MS` | 20 s | Uma transação financeira saudável dura dezenas de milissegundos; o teste de carga mediu p99 de 1,6 s e máximo de 2,2 s na hot wallet com 12 VUs. 20 s é uma ordem de magnitude acima do pior caso observado, então um 503 por `lock_timeout` significa contenção anômala, não carga normal | precisa ficar abaixo do `VisibilityTimeout` da fila: uma mensagem que espera lock por mais tempo que a visibilidade volta para a fila enquanto ainda está sendo processada, e a Inbox passa a absorver trabalho que não precisava existir |
+
+O valor é configurável porque o ponto de equilíbrio depende do perfil de contenção de cada operação; a relação com a visibilidade é que não pode ser rompida.
+
+### 13.2 Consumidor SQS
+
+| Parâmetro | Valor | Por que este valor | Relação a preservar |
+|---|---|---|---|
+| `VisibilityTimeout` | 60 s | Precisa cobrir o pior caso de uma mensagem: até 20 s esperando o lock, mais o processamento, mais folga. 3× o `lock_timeout` | o consumidor reinicia essa janela por mensagem do lote, então ela dimensiona uma mensagem, não o lote inteiro |
+| `maxReceiveCount` | 5 | Com o backoff abaixo, cinco recebimentos gastam 5+10+20+40 = 75 s antes da DLQ. Absorve uma indisponibilidade de cerca de um minuto e isola uma mensagem envenenada em outro tanto | um valor maior mantém a mensagem envenenada circulando e, como o `MessageGroupId` é o `walletId`, ela bloqueia as demais operações daquela Wallet; um valor menor manda mensagem válida à DLQ durante um blip |
+| Backoff transitório | 5 s base, teto 60 s | O teto é igual ao `VisibilityTimeout` porque adiar além da janela de visibilidade não adia nada; o `ChangeMessageVisibility` é o próprio mecanismo do adiamento | teto e visibilidade caminham juntos |
+| `WaitTimeSeconds` | 20 s | É o máximo que o SQS aceita em long polling. Menos que isso só aumenta chamadas vazias | — |
+| `BatchSize` | 10 | Máximo do `ReceiveMessage` | seguro apenas porque cada mensagem do lote reinicia sua própria visibilidade; sem isso, um lote grande faria a última mensagem herdar a espera de todas as anteriores |
+| Graça de in-flight / janela de shutdown | 25 s / 30 s | A reserva de 5 s entre as duas é o que paga a devolução da visibilidade do que a graça não terminou | os 30 s precisam caber no `stop_grace_period: 45s` do Compose, senão o Docker manda `SIGKILL` no meio da devolução e as mensagens só voltam ao expirar a visibilidade |
+
+### 13.3 Publisher da Outbox
+
+| Parâmetro | Valor | Por que este valor | Relação a preservar |
+|---|---|---|---|
+| Lease / timeout de envio | 30 s / 10 s | A folga de 3× reduz claim expirando durante uma chamada saudável, que faria dois publishers enviarem o mesmo evento | o timeout cobre a chamada inteira, resolução da URL da fila incluída; uma resolução pendurada consumiria o lease sem que o publisher soubesse |
+| Backoff de publicação | 1 s base, teto 60 s, jitter ±20% | Mais agressivo que o do consumidor porque falha de publicação não bloqueia grupo FIFO nenhum e o evento já está durável no PostgreSQL: o custo de tentar cedo é uma query, e o ganho é lag menor | o jitter existe para publishers concorrentes não voltarem em fase depois de uma indisponibilidade comum |
+| Espera ociosa / após erro | 500 ms / 2 s | A espera ociosa é o lag que um evento novo herda ao chegar num publisher parado; 500 ms limita esse piso sem transformar o laço em polling caro. Os 2 s após erro evitam marretar um SQS que já está caído | o desligamento interrompe as duas esperas em vez de aguardá-las |
+
+### 13.4 Worker de referências pendentes
+
+| Parâmetro | Valor | Por que este valor | Relação a preservar |
+|---|---|---|---|
+| Tick | 5 s | Igual ao piso do backoff: tickar mais rápido não encontraria item elegível, porque nenhuma pendência fica devida antes de 5 s | tick e primeiro retry são o mesmo número por construção |
+| Primeiro retry / base do backoff | 5 s | A janela típica de entrega fora de ordem no FIFO é de segundos. 5 s cobre a chegada atrasada comum sem gastar tentativa | — |
+| Teto do backoff | 300 s | Acima de 5 minutos a latência de resposta ao provedor passa a doer mais do que insistir ajuda | — |
+| TTL | 6 h | É a promessa ao provedor: em 6 h existe resposta terminal. Uma reversão cuja referência não apareceu em 6 h quase sempre indica payload errado do provedor, não atraso de entrega. E 6 h é curto o bastante para reagir dentro de um turno operacional | — |
+| Máximo de tentativas | 100 | Teto de trabalho por item, papel diferente do TTL. Com o backoff acima, 100 tentativas somam cerca de 7,9 h de relógio, então o TTL de 6 h termina primeiro no default; as tentativas são o cinto de segurança para quando o backoff for reconfigurado para valores menores | os dois limites precisam continuar ordenados assim, ou o item passa a morrer por contagem antes de a promessa de tempo vencer |
+
+### 13.5 Superfície e coleta
+
+| Parâmetro | Valor | Por que este valor |
+|---|---|---|
+| Página do ledger | default 50, máximo 200 | 50 é o valor do próprio exemplo do README §9; o teto de 200 limita o custo de uma página keyset e o tamanho da resposta |
+| Tick do coletor de gauges | 15 s | Os três gauges operacionais custam uma query cada; 15 s é a granularidade típica de scrape do Prometheus, então amostrar mais rápido gastaria banco sem melhorar o que o scrape enxerga. A consequência, freshness de até 15 s, está na seção 12 |
+| Escala de `Money` | 2 | Exigência do README §6.1 |
+| Precisão do `Decimal` | 34 dígitos | É a precisão de IEEE 754 decimal128. Cobre qualquer soma de ledger dentro de `numeric(20,2)` sem arredondamento intermediário, e o arredondamento configurado (`ROUND_HALF_UP`) só age na fronteira de escala 2 |
+
+## 14. Estratégia de testes
 
 O caminho principal é `docker-compose.test.yml` controlado por scripts Bun. PostgreSQL 16 e LocalStack são serviços reais em containers, e nenhuma suíte substitui os dois por mock. O schema é recriado por `migrate:fresh` antes de cada execução, e três processos reais são iniciados com `Bun.spawn` contra a mesma infraestrutura.
 
-Os casos de uso rodam nos testes sob a **role de runtime** `wagering_app`, nunca sob a credencial de migration. A distinção importa: um `GRANT` de coluna que falte deixa de ser um defeito silencioso e vira falha de suíte. Só o que precisa de privilégio elevado — DDL das migrations, `DELETE` de fixture, adulteração deliberada do ledger — usa `wagering_migrator`.
+Os casos de uso rodam nos testes sob a role de runtime `wagering_app`, nunca sob a credencial de migration. Um `GRANT` de coluna que falte deixa de ser um defeito silencioso e vira falha de suíte. Só o que precisa de privilégio elevado usa `wagering_migrator`: DDL das migrations, `DELETE` de fixture e a adulteração do ledger nos testes de imutabilidade.
 
-Estado atual, executado: **178 testes de unidade, 144 de integração e 11 de concorrência**, com `bun run typecheck` limpo.
+Estado atual, executado: **186 testes de unidade, 150 de integração e 11 de concorrência**, com `bun run typecheck` limpo. `bun run test` soma 189 porque roda também os três casos do harness de carga em `test/load/metrics.spec.ts`.
 
 Testes de unidade cobrem Money, Wallet, state machine, todos os kinds, reversões da opção B, payloadHash, backoffs, envelope SQS, classificação de erro do PostgreSQL, exposição de métricas e o ponto de extensão de identidade. Integração real cobre migrations e constraints, atomicidade entre Wallet/Wager/ledger/Inbox/Outbox, contrato HTTP completo, SQS, pending worker, Outbox, reconciliação, papéis e logging. O conflito de moeda tem caso completo: BET USD contra Wallet BRL termina REJECTED/CURRENCY_MISMATCH com snapshot BRL, sem alterar saldo, version, updatedAt ou ledger.
 
@@ -565,7 +627,7 @@ Os testes de concorrência e crash usam paralelismo real, liberado por barreira 
 1. a mesma BET 50 vezes em paralelo: uma Wager, um débito e 49 replays;
 2. duas BET de 80.00 sobre saldo 100.00: uma PROCESSED, uma REJECTED e saldo 20.00;
 3. Wallets distintas em paralelo, hot wallet e três processos contra o mesmo banco;
-4. Wallet travada por outra transação não bloqueia Wallet livre — não há lock global;
+4. Wallet travada por outra transação não bloqueia Wallet livre, o que prova que não há lock global;
 5. mensagens distintas para a mesma Wallet, cada uma em seu próprio MessageGroupId, com o lock mantido explicitamente até pelo menos dois workers disputarem a Wallet e com participação confirmada por instância;
 6. worker morto entre o commit e o ACK, num processo real: redelivery barrada pela Inbox e efeito financeiro único;
 7. restart dos três processos com requisições em voo: as mesmas identidades são reaplicadas nos processos novos, a quantidade exata de commits é consultada no banco e uma operação final é reconciliada; separadamente, a Outbox pendente deixada pelo worker morto é publicada por um publisher novo;
@@ -578,7 +640,7 @@ Os testes de concorrência e crash usam paralelismo real, liberado por barreira 
 Todo teste que movimenta saldo termina verificando:
 
     wallet.balance == saldo reconstruído pelo ledger
-### 13.1 Teste de carga — diferencial opcional escolhido
+### 14.1 Teste de carga — diferencial opcional escolhido
 
 `bun run test:load` combina k6 (geração HTTP e percentis) com um runner Bun (infraestrutura, produtor SQS, métricas e verificação SQL). Não importa `bun:test`, não roda nas suítes normais e não muda o domínio nem as opções de transação da aplicação. Requer k6 instalado no PATH; não usa extensões ou imports remotos no script de carga.
 
@@ -594,11 +656,11 @@ Os cinco perfis têm, por padrão, 12 VUs constantes durante 30 s cada, sem thin
 
 Cada operação vale `1.00 BRL` e a abertura é `1000000000.00 BRL`, exceto no perfil escasso; o saldo elevado evita medir rejeições por falta de saldo onde a intenção é medir processamento. Money permanece string; somas, reconstrução líquida e mínimos históricos são calculados no PostgreSQL. A validação cruza contagens aceitas e recusadas pelo k6 e envelopes SQS com transações persistidas, verifica hashes/identidades, estado terminal, correspondência e cardinalidade dos lançamentos, versão, saldo, Inbox e os tipos/quantidades de eventos esperados; uma transação `REJECTED` precisa carregar `failureCode`, não ter lançamento e emitir exatamente um `WagerTransactionRejected`. Após a carga, há um limite explícito de drain (180 s por padrão): Outbox pendente, claim residual ou entrada ainda em voo reprovam o cenário.
 
-O runner salva ambiente e configuração, versão k6/Bun/PostgreSQL, containers ativos, requests totais, throughput, taxa de erro, p50/p95/p99 e duração separada de carga e drain, e com esses dados renderiza `test/load/RESULTS.md`: método e limitações são texto fixo, todo número e toda comparação saem do run, e uma execução reprovada sobrescreve o arquivo com o próprio fracasso em vez de deixar os números anteriores no lugar. A separação existe para que a análise nunca contradiga o artefato — no desenvolvimento deste relatório uma frase interpretativa fixa foi invalidada pelos dados de uma execução, e comparações desse tipo passaram a ser calculadas e condicionais. Salva scrapes por instância antes/depois e a cada 2 s, além de backlog/idade e espera por locks amostrados no PostgreSQL, com o pico de `outbox_oldest_pending_age_seconds` do perfil no relatório. Essa amostragem tem custo: a consulta roda a cada 2 s durante a carga e a cada 200 ms durante o drain, na mesma instância que os publishers usam, e está dentro das durações reportadas — o índice parcial `outbox_pending_ix` a limita ao conjunto pendente, mas o custo não foi isolado. Counters/histogramas usam deltas somados entre instâncias; gauges globais permanecem nos scrapes por instância e não são somados. O p95 de lock derivado do histograma é reportado como limite superior do bucket, não como percentil exato. A freshness dos gauges continua sujeita ao collector de 15 s e suas falhas.
+O runner salva ambiente e configuração, versão k6/Bun/PostgreSQL, containers ativos, requests totais, throughput, taxa de erro, p50/p95/p99 e duração separada de carga e drain, e com esses dados renderiza `test/load/RESULTS.md`: método e limitações são texto fixo, todo número e toda comparação saem do run, e uma execução reprovada sobrescreve o arquivo com o próprio fracasso em vez de deixar os números anteriores no lugar. A separação existe para que a análise nunca contradiga o artefato. Durante o desenvolvimento deste relatório, uma frase interpretativa fixa foi invalidada pelos dados de uma execução; desde então, comparações desse tipo são calculadas e condicionais. Salva scrapes por instância antes/depois e a cada 2 s, além de backlog/idade e espera por locks amostrados no PostgreSQL, com o pico de `outbox_oldest_pending_age_seconds` do perfil no relatório. Essa amostragem tem custo: a consulta roda a cada 2 s durante a carga e a cada 200 ms durante o drain, na mesma instância que os publishers usam, e está dentro das durações reportadas. O índice parcial `outbox_pending_ix` limita a consulta ao conjunto pendente, mas o custo não foi isolado. Counters/histogramas usam deltas somados entre instâncias; gauges globais permanecem nos scrapes por instância e não são somados. O p95 de lock derivado do histograma é reportado como limite superior do bucket, não como percentil exato. A freshness dos gauges continua sujeita ao collector de 15 s e suas falhas.
 
-Zero erro de contrato/HTTP e checks válidos são thresholds obrigatórios; erros, inclusive timeouts, entram nos percentis e não são escondidos por retry do gerador. `LOAD_P95_MS` permite uma meta de latência explicitamente escolhida pelo operador. Não existe meta de RPS do challenge. Esse modelo fechado reduz a taxa quando o servidor demora e não mede capacidade sob taxa de chegada aberta. Não há tracing nem suspensão artificial de publisher. O backlog de mensagens já publicadas na fila de eventos é esperado: o produto não tem consumidor downstream dessa fila. Ele não equivale a Outbox não publicada, mas não é inócuo para o experimento — acumulado ao longo de várias execuções, o broker responde mais devagar a `SendMessage` e o drain da Outbox degrada até estourar seu limite. Por isso o runner purga essa fila no modo gerenciado, e a comparação entre execuções deixa de piorar monotonicamente.
+Zero erro de contrato/HTTP e checks válidos são thresholds obrigatórios; erros, inclusive timeouts, entram nos percentis e não são escondidos por retry do gerador. `LOAD_P95_MS` permite uma meta de latência explicitamente escolhida pelo operador. Não existe meta de RPS do challenge. Esse modelo fechado reduz a taxa quando o servidor demora e não mede capacidade sob taxa de chegada aberta. Não há tracing nem suspensão artificial de publisher. O backlog de mensagens já publicadas na fila de eventos é esperado: o produto não tem consumidor downstream dessa fila. Ele não equivale a Outbox não publicada, mas afeta o experimento: acumulado ao longo de várias execuções, faz o broker responder mais devagar a `SendMessage`, e o drain da Outbox degrada até estourar seu limite. Por isso o runner purga essa fila no modo gerenciado, e a comparação entre execuções deixa de piorar monotonicamente.
 
-## 14. Limitações e escolhas explícitas
+## 15. Limitações e escolhas explícitas
 
 - A saída é at-least-once; consumidores deduplicam eventId, e publishers concorrentes podem inverter a ordem de ocorrência.
 - Retry bloqueia o grupo FIFO da Wallet; uma falha prolongada pode levar mensagem válida à DLQ e exigir redrive.

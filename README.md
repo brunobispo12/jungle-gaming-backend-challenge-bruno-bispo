@@ -17,15 +17,15 @@ O que existe e roda:
 - `GET /metrics` em formato Prometheus, com transações por status, replay e Inbox
   duplicados, retries, DLQ, espera/conflitos de lock, latência, referências pendentes,
   reconciliação e backlog/idade da Outbox coletados sem depender dos publishers;
-- o domínio financeiro — `Money` decimal exato, `Wallet`, ledger imutável, ciclo de vida
+- o domínio financeiro: `Money` decimal exato, `Wallet`, ledger imutável, ciclo de vida
   da `WagerTransaction` e validação de reversão;
 - criação de wallet e submissão de wager como casos de uso transacionais, com reserva de
   idempotência, lock pessimista por wallet, ledger e outbox no mesmo commit;
 - `POST /wallets`, `GET /wallets/:id`, `POST /wagering/transactions` e as duas consultas
   de transação;
 - `GET /wallets/:id/ledger?cursor=&limit=`: keyset descendente por `(created_at, id)` com
-  cursor opaco, limite padrão 50 e máximo 200 — nunca `OFFSET`, que pularia ou repetiria
-  lançamentos enquanto o cliente percorre as páginas;
+  cursor opaco, limite padrão 50 e máximo 200. Não usa `OFFSET`, porque `OFFSET` pula ou
+  repete lançamentos enquanto o cliente percorre as páginas;
 - `POST /wallets/:id/reconciliation`: compara saldo materializado e saldo reconstruído do
   ledger num único snapshot `REPEATABLE READ READ ONLY`, e reporta a divergência sem
   corrigir nada;
@@ -37,36 +37,36 @@ O que existe e roda:
   permanente, com backoff por `ChangeMessageVisibility` e envio à DLQ antes do delete;
 - o worker de referências pendentes: tick de 5 s sem líder, `FOR UPDATE SKIP LOCKED` sem
   lease, backoff exponencial com jitter até 5 min, e encerramento como `REJECTED` ao
-  esgotar o TTL de 6 h ou as 100 tentativas — ou como `FAILED` quando a falha é
-  determinística, em vez de culpar o provedor por um defeito nosso;
+  esgotar o TTL de 6 h ou as 100 tentativas, e como `FAILED` quando a falha é
+  determinística, para que um defeito nosso não vire `REJECTED` contra o provedor;
 - `ProviderIdentityPort` com `TrustedProviderIdentityAdapter` no caminho real de
   `POST /wagering/transactions`: é o ponto de extensão de autenticação que o desafio pede
   quando ela não é implementada, e o `providerId` resolvido é o que entra no comando;
-- a superfície operacional — `/health/live`, `/health/ready` e `/metrics` — responde em
-  **qualquer papel**, inclusive num processo sem `api`, porque métricas de um consumer ou
-  de um publisher precisam ser raspáveis; sem o papel `api` a API de negócio responde 404;
+- `/health/live`, `/health/ready` e `/metrics` respondem em qualquer papel, inclusive num
+  processo sem `api`, porque as métricas de um consumer ou de um publisher também precisam
+  ser raspadas. Sem o papel `api`, a API de negócio responde 404;
 - 186 testes de unidade, 150 de integração e 11 de concorrência com três processos reais
   contra PostgreSQL e LocalStack reais, com os casos de uso rodando sob a role de runtime
   `wagering_app`, não sob a credencial de migration.
 
-Uma interpretação vale destaque aqui, e não só no `ARCHITECTURE.md`: a regra 4 do README §7
-diz que uma referência não pode ser revertida duas vezes **pelo mesmo tipo de operação**, e é
-isso que o banco garante — índice único parcial em `(reference_transaction_id, kind)` para
-`PROCESSED`. A consequência é que `BET → REFUND(BET) → ROLLBACK(BET)` é aceito e credita duas
-vezes. Optei pela leitura literal do enunciado em vez de proibir a segunda reversão de tipo
-diferente, que recusaria um `ROLLBACK` legítimo de um `REFUND` errado. O trade-off e a
-constraint alternativa estão em [`ARCHITECTURE.md` §3.5](ARCHITECTURE.md).
+Uma interpretação do enunciado fica registrada aqui também, além do `ARCHITECTURE.md`. A
+regra 4 do README §7 diz que uma referência não pode ser revertida duas vezes pelo mesmo tipo
+de operação. O banco garante isso com um índice único parcial em
+`(reference_transaction_id, kind)` para `PROCESSED`. A consequência é que
+`BET → REFUND(BET) → ROLLBACK(BET)` é aceito e credita duas vezes. Escolhi a leitura literal
+em vez de proibir a segunda reversão de tipo diferente, porque essa proibição recusaria um
+`ROLLBACK` legítimo de um `REFUND` errado. O trade-off e a constraint alternativa estão em
+[`ARCHITECTURE.md` §3.5](ARCHITECTURE.md).
 
 O diferencial de carga está disponível separadamente em `bun run test:load`, com k6,
 cinco perfis e validação financeira no PostgreSQL após cada cenário.
 Tracing com OpenTelemetry (README §12) continua não implementado. Autenticação funcional
 também não existe (README §2 não pontua); o ponto de extensão é `ProviderIdentityPort`, e
-o adapter atual confia na identidade declarada. Nada acima descreve comportamento que não
-tenha sido executado.
+o adapter atual confia na identidade declarada. Tudo o que está listado acima foi executado.
 
 ## Pré-requisitos
 
-- [Bun](https://bun.sh) 1.x — runtime, package manager e test runner
+- [Bun](https://bun.sh) 1.x: runtime, package manager e test runner
 - Docker com Docker Compose
 
 ## Setup
@@ -103,7 +103,7 @@ bun run infra:down
 ## Testes
 
 A suíte de integração sobe a infraestrutura de teste, recria o schema e roda contra
-PostgreSQL real — nunca contra mock.
+PostgreSQL real, nunca contra mock.
 
 ```bash
 bun run test:integration
@@ -145,23 +145,23 @@ Requer o executável [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
 bun run test:load
 ```
 
-O runner sobe `docker-compose.load.yml`: PostgreSQL em **55434**, LocalStack em **54567**
-e três processos Bun em **3201–3203**, com todos os papéis e configurações financeiras
-normais. Aplica somente migrations pendentes. Cria fixtures novas por execução, sem
-apagar históricos; registra a quantidade de transações pré-existentes. Purga a fila de
-eventos antes de medir — ela não tem consumidor downstream, cresce a cada execução e o
-broker vai ficando mais lento para aceitar publicações, o que degradaria a comparação
-entre execuções. Ao terminar, encerra seus processos e deixa os containers/dados
-disponíveis para inspeção.
+O runner sobe `docker-compose.load.yml`: PostgreSQL em 55434, LocalStack em 54567 e três
+processos Bun em 3201–3203, com todos os papéis e configurações financeiras normais.
+Aplica somente migrations pendentes. Cria fixtures novas por execução, sem apagar
+históricos; registra a quantidade de transações pré-existentes. Purga a fila de eventos
+antes de medir. Essa fila não tem consumidor downstream, cresce a cada execução, e o broker
+fica mais lento para aceitar publicações, o que degradaria a comparação entre execuções. Ao
+terminar, encerra seus processos e deixa os containers e os dados disponíveis para
+inspeção.
 
-Defaults: **30 s, 12 VUs por perfil**, sem pausa entre requisições. A sequência é wallets
+Defaults: 30 s e 12 VUs por perfil, sem pausa entre requisições. A sequência é wallets
 distintas (uma por VU), hot wallet (uma para todos), hot wallet com saldo escasso,
 idempotência (mesmo fato para todos) e mix determinístico BET/BET/WIN/LOSS, com
-**5 operações SQS/s** em paralelo no mix.
+5 operações SQS/s em paralelo no mix.
 Cada operação vale `1.00 BRL`. As wallets abrem com `1000000000.00 BRL`, para medir
-processamento sem transformar o cenário em rejeições por falta de saldo — exceto o perfil
-escasso, que abre com `5.00 BRL` e cicla BET/BET/WIN justamente para prender o saldo na
-fronteira de zero e manter o caminho de rejeição sob contenção durante toda a execução.
+processamento sem transformar o cenário em rejeições por falta de saldo. O perfil escasso
+é a exceção: abre com `5.00 BRL` e cicla BET/BET/WIN para prender o saldo na fronteira de
+zero e manter o caminho de rejeição sob contenção durante toda a execução.
 Uma em cada cinco operações SQS é enviada duas vezes com a mesma identidade autoral
 e deduplication IDs diferentes, exercitando a Inbox além da deduplicação FIFO.
 
@@ -179,7 +179,7 @@ nos percentis do benchmark.
 | `LOAD_P95_MS` | ausente; SLO opcional explícito para p95 das submissões, em ms |
 | `LOAD_BASE_URL` | ausente: gerencia a stack isolada; presente: usa a stack fornecida. Aceita URLs separadas por vírgula |
 | `LOAD_METRICS_URLS` | mesmas URLs de negócio; informe todas as instâncias se a base for um balanceador |
-| `LOAD_DATABASE_URL` | conexão **runtime** da stack externa; obrigatória com `LOAD_BASE_URL` |
+| `LOAD_DATABASE_URL` | conexão de runtime da stack externa; obrigatória com `LOAD_BASE_URL` |
 | `LOAD_AWS_ENDPOINT_URL` | endpoint SQS da stack externa; obrigatório com `LOAD_BASE_URL` |
 | `LOAD_INPUT_QUEUE`, `LOAD_EVENTS_QUEUE`, `LOAD_DLQ_QUEUE` | nomes padrão da aplicação |
 
@@ -222,26 +222,27 @@ de chegada aberta nem uma promessa de capacidade. Os gauges podem estar atrasado
 collector de 15 s; amostras SQL mostram o backlog real do cenário. Essas amostras não são
 gratuitas: o monitor consulta o banco a cada 2 s durante a carga e a cada 200 ms durante o
 drain, no mesmo PostgreSQL que os publishers usam, e esse custo está dentro das durações
-reportadas. Integridade é binária: os saldos mínimos históricos reportam folga financeira,
-não uma distância até uma race — exceto no perfil escasso, onde o mínimo histórico é o
-próprio zero e a folga medida é nula por construção.
+reportadas. Integridade é binária. Os saldos mínimos históricos reportam folga financeira,
+não uma distância até uma race. No perfil escasso o mínimo histórico é o próprio zero, e a
+folga medida é nula por construção.
 A fila de eventos acumula mensagens publicadas porque não há consumidor downstream no
 produto; isso é diferente de Outbox não publicada, e é o motivo de o runner purgá-la antes
 de cada medição gerenciada. Para um banco novamente vazio, encerre
 a stack de carga entre execuções (`docker compose -f docker-compose.load.yml down -v`);
 esse comando remove somente os dados reproduzíveis dessa stack.
 
-[`test/load/RESULTS.md`](test/load/RESULTS.md) é **gerado pelo runner**, não escrito à mão:
-o texto de método e limitações é fixo, e todo número, tabela e comparação sai do run. Cada
-execução sobrescreve o arquivo, inclusive quando um perfil reprova — o relatório é o registro
-da execução, não uma afirmação separada dela. Os dados brutos ficam em `artifacts/load/`,
+[`test/load/RESULTS.md`](test/load/RESULTS.md) é gerado pelo runner, não escrito à mão. O
+texto de método e limitações é fixo; todo número, tabela e comparação sai do run. Cada
+execução sobrescreve o arquivo, inclusive quando um perfil reprova, porque o relatório é o
+registro da execução e não uma afirmação separada dela. Os dados brutos ficam em `artifacts/load/`,
 ignorados pelo Git. O cálculo de deltas e percentis do harness tem testes próprios, que rodam
 junto com `bun run test` por não precisarem de container.
 
 ## Configuração
 
 Variáveis lidas pelo processo. O Docker Compose já as define; rodar fora dele exige
-apontá-las para a infraestrutura desejada.
+apontá-las para a infraestrutura desejada. `cp .env.example .env` cobre esse caso: o
+arquivo já aponta para o PostgreSQL e o LocalStack que `bun run infra:up` deixa no ar.
 
 | Variável | Papel |
 |---|---|
@@ -256,7 +257,7 @@ apontá-las para a infraestrutura desejada.
 
 ## Banco
 
-Duas credenciais, de propósito:
+Duas credenciais:
 
 - `wagering_migrator` é dona do schema e roda migrations;
 - `wagering_app` é a role de runtime. Recebe `UPDATE` apenas nas colunas mutáveis de cada
