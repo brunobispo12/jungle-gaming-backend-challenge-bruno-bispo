@@ -101,14 +101,25 @@ bun run infra:down
 
 ## Testes
 
-A suíte de integração sobe a infraestrutura de teste, recria o schema e roda contra
-PostgreSQL real, nunca contra mock.
+São quatro suítes. Nenhuma substitui PostgreSQL ou SQS por mock: as três últimas rodam contra
+containers reais, e os casos de uso executam sob a role de runtime `wagering_app`, não sob a
+credencial de migration.
 
 ```bash
-bun run test:integration
+bun run typecheck         # TypeScript strict, sem emitir
+bun run test              # 189 casos: unidade do domínio e harness de carga, sem container
+bun run test:integration  # 150 casos contra PostgreSQL e LocalStack reais
+bun run test:concurrency  # 11 cenários com três processos reais em paralelo
+bun run test:load         # k6: cinco perfis com verificação financeira em SQL
 ```
 
-Infraestrutura de teste isolada da stack de desenvolvimento (portas 55432 e 54566):
+`test:integration` e `test:concurrency` sobem a infraestrutura de teste e recriam o schema
+sozinhos. `test:concurrency` inicia três processos da aplicação com `Bun.spawn` contra a mesma
+infraestrutura, que é o paralelismo real exigido pelo README §13.4 e não instâncias no mesmo
+processo. `test:load` é o diferencial opcional do §14 e exige [k6](https://grafana.com/docs/k6/latest/set-up/install-k6/)
+no PATH; os detalhes estão em [Teste de carga](#teste-de-carga).
+
+Para subir a infraestrutura de teste sem rodar suíte alguma (portas 55432 e 54566):
 
 ```bash
 bun run test:infra:up
