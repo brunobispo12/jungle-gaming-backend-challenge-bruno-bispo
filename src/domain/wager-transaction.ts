@@ -37,6 +37,13 @@ const REVERSAL_KINDS: readonly WagerTransactionKind[] = [
   WagerTransactionKind.Rollback,
 ];
 
+// Never snapshot a wallet the caller has no claim over: it turns a guessed
+// walletId into a balance probe.
+const DISCLOSES_NO_BALANCE: readonly FailureCode[] = [
+  FailureCode.WalletNotFound,
+  FailureCode.WalletPlayerMismatch,
+];
+
 export const INTERNAL_PROVIDER_ID = 'internal';
 
 export function openingIdentity(walletId: string): {
@@ -279,7 +286,7 @@ export class WagerTransaction {
       throw new InvalidWagerTransactionError('INFRASTRUCTURE_FAILURE belongs to FAILED');
     }
 
-    const observedWallet = props.code !== FailureCode.WalletNotFound;
+    const observedWallet = !DISCLOSES_NO_BALANCE.includes(props.code);
     if (observedWallet && !props.resultBalance) {
       throw new InvalidWagerTransactionError(
         `rejection ${props.code} observed the wallet and requires the historical balance`,
@@ -287,7 +294,7 @@ export class WagerTransaction {
     }
     if (!observedWallet && props.resultBalance) {
       throw new InvalidWagerTransactionError(
-        'WALLET_NOT_FOUND cannot carry a historical balance: no wallet was observed',
+        `${props.code} cannot carry a historical balance: the caller does not own that wallet`,
       );
     }
 

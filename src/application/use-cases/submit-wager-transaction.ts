@@ -173,7 +173,7 @@ export class SubmitWagerTransactionUseCase {
       return this.reject(repositories, transaction, FailureCode.WalletNotFound, undefined, now, context);
     }
     if (wallet.playerId !== command.playerId) {
-      return this.reject(repositories, transaction, FailureCode.WalletPlayerMismatch, wallet.balance, now, context);
+      return this.reject(repositories, transaction, FailureCode.WalletPlayerMismatch, undefined, now, context);
     }
     if (wallet.currency !== transaction.money.currency) {
       return this.reject(repositories, transaction, FailureCode.CurrencyMismatch, wallet.balance, now, context);
