@@ -117,12 +117,20 @@ bun run test:infra:down
 
 As suítes sobem a infraestrutura de que precisam e **deixam os containers no ar** ao terminar.
 É deliberado: subir PostgreSQL e LocalStack custa dezenas de segundos por execução, e um banco
-que sobrevive ao teste é o que permite investigar uma falha depois que ela acontece. Cada stack
-tem o seu comando de limpeza, e `infra:clean` derruba as três de uma vez, volumes inclusive:
+que sobrevive ao teste é o que permite investigar uma falha depois que ela acontece.
+
+São três stacks independentes, cada uma com o seu comando de limpeza. Todos removem também os
+volumes da stack correspondente:
 
 ```bash
-bun run infra:clean
+bun run infra:down       # desenvolvimento: PostgreSQL, LocalStack e as três instâncias
+bun run test:infra:down  # testes: PostgreSQL e LocalStack nas portas 55432 e 54566
+bun run load:down        # carga: PostgreSQL e LocalStack nas portas 55434 e 54567
 ```
+
+`bun run stacks:down` executa os três em sequência. Derruba **tudo**, inclusive as instâncias
+da aplicação da stack de desenvolvimento — use quando quiser a máquina limpa, e não como
+limpeza de rotina depois de uma suíte.
 
 ## Comandos
 
@@ -132,7 +140,7 @@ bun run infra:clean
 | `bun run typecheck` | TypeScript em modo estrito, sem emitir |
 | `bun run test` | suíte de unidade do domínio e do harness de carga, sem container |
 | `bun run infra:up` | sobe PostgreSQL, LocalStack e as três instâncias |
-| `bun run infra:down` | derruba a stack e remove volumes |
+| `bun run infra:down` | derruba a stack de desenvolvimento e remove seus volumes |
 | `bun run start` | roda a aplicação localmente contra a infraestrutura já no ar |
 | `bun run dev` | igual ao anterior, com watch |
 | `bun run migrate:up` | aplica as migrations pendentes |
@@ -144,7 +152,7 @@ bun run infra:clean
 | `bun run test:infra:up` | sobe só a infraestrutura de teste |
 | `bun run test:infra:down` | derruba a infraestrutura de teste e seus volumes |
 | `bun run load:down` | derruba a stack de carga e seus volumes |
-| `bun run infra:clean` | derruba as três stacks — desenvolvimento, teste e carga — com volumes |
+| `bun run stacks:down` | derruba as três stacks, instâncias da aplicação inclusive, com volumes |
 
 ## Teste de carga
 
