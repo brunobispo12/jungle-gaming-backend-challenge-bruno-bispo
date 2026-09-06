@@ -1,6 +1,6 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 
-import type { InboxMessage, InboxRepository } from '@/application/ports';
+import type { InboxKey, InboxMessage, InboxRepository } from '@/application/ports';
 import { inboxMessageSchema, type InboxMessageRow } from './rows';
 import { StaleWriteError } from './stale-write-error';
 
@@ -21,28 +21,20 @@ export class MikroInboxRepository implements InboxRepository {
     return inserted[0] ? toMessage(inserted[0]) : undefined;
   }
 
-  async find(consumerName: string, messageId: string): Promise<InboxMessage | undefined> {
-    const row = await this.em.findOne(
-      inboxMessageSchema,
-      { consumerName, messageId },
-      { refresh: true },
-    );
+  async find(key: InboxKey): Promise<InboxMessage | undefined> {
+    const row = await this.em.findOne(inboxMessageSchema, { ...key }, { refresh: true });
     return row ? toMessage(row) : undefined;
   }
 
-  async markProcessed(
-    consumerName: string,
-    messageId: string,
-    processedAt: Date,
-  ): Promise<void> {
-    const affected = await this.em.nativeUpdate(
-      inboxMessageSchema,
-      { consumerName, messageId },
-      { processedAt },
-    );
+  async markProcessed(key: InboxKey, processedAt: Date): Promise<void> {
+    const affected = await this.em.nativeUpdate(inboxMessageSchema, { ...key }, { processedAt });
 
     if (affected !== 1) {
-      throw new StaleWriteError('inbox_message', `${consumerName}/${messageId}`, affected);
+      throw new StaleWriteError(
+        'inbox_message',
+        `${key.consumerName}/${key.providerId}/${key.messageId}`,
+        affected,
+      );
     }
   }
 }
@@ -50,6 +42,7 @@ export class MikroInboxRepository implements InboxRepository {
 function toRow(message: InboxMessage): InboxMessageRow {
   return {
     consumerName: message.consumerName,
+    providerId: message.providerId,
     messageId: message.messageId,
     payloadHash: message.payloadHash,
     brokerMessageId: message.brokerMessageId ?? null,
@@ -61,6 +54,7 @@ function toRow(message: InboxMessage): InboxMessageRow {
 function toMessage(row: InboxMessageRow): InboxMessage {
   return {
     consumerName: row.consumerName,
+    providerId: row.providerId,
     messageId: row.messageId,
     payloadHash: row.payloadHash,
     brokerMessageId: row.brokerMessageId ?? undefined,

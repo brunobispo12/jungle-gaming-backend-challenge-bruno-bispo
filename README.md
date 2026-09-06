@@ -22,7 +22,11 @@ O que existe e roda:
 - criação de wallet e submissão de wager como casos de uso transacionais, com reserva de
   idempotência, lock pessimista por wallet, ledger e outbox no mesmo commit;
 - `POST /wallets`, `GET /wallets/:id`, `POST /wagering/transactions` e as duas consultas
-  de transação;
+  de transação. As duas consultas são escopadas pelo provider: a que traz `providerId` no
+  caminho usa o do caminho, e `GET /wagering/transactions/:id` pede o header
+  `X-Provider-Id`, sem o qual responde 400. Transação de outro provider responde 404, e
+  não 403, porque distinguir "não existe" de "existe e não é sua" já entrega a existência
+  do identificador;
 - `GET /wallets/:id/ledger?cursor=&limit=`: keyset descendente por `(created_at, id)` com
   cursor opaco, limite padrão 50 e máximo 200. Não usa `OFFSET`, porque `OFFSET` pula ou
   repete lançamentos enquanto o cliente percorre as páginas;
@@ -32,7 +36,7 @@ O que existe e roda:
 - o publisher da outbox: lease entre publishers concorrentes, backoff exponencial com
   jitter e publicação em `wager-events.fifo` sempre depois do commit;
 - o consumidor de `wager-transactions.fifo`: reusa o mesmo caso de uso do HTTP, deduplica
-  por inbox persistente `(consumerName, messageId)` no mesmo commit da alteração
+  por inbox persistente `(consumerName, providerId, messageId)` no mesmo commit da alteração
   financeira, dá `ack` só depois do commit e separa erro de negócio, transitório e
   permanente, com backoff por `ChangeMessageVisibility` e envio à DLQ antes do delete;
 - o worker de referências pendentes: tick de 5 s sem líder, `FOR UPDATE SKIP LOCKED` sem
@@ -40,8 +44,9 @@ O que existe e roda:
   esgotar o TTL de 6 h ou as 100 tentativas, e como `FAILED` quando a falha é
   determinística, para que um defeito nosso não vire `REJECTED` contra o provedor;
 - `ProviderIdentityPort` com `TrustedProviderIdentityAdapter` no caminho real de
-  `POST /wagering/transactions`: é o ponto de extensão de autenticação que o desafio pede
-  quando ela não é implementada, e o `providerId` resolvido é o que entra no comando;
+  `POST /wagering/transactions` e das duas consultas de transação: é o ponto de extensão
+  de autenticação que o desafio pede quando ela não é implementada, e o `providerId`
+  resolvido é o que entra no comando e o que escopa a leitura;
 - `/health/live`, `/health/ready` e `/metrics` respondem em qualquer papel, inclusive num
   processo sem `api`, porque as métricas de um consumer ou de um publisher também precisam
   ser raspadas. Sem o papel `api`, a API de negócio responde 404;

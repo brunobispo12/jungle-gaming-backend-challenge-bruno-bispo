@@ -79,7 +79,7 @@ O código é separado em domain, application, infrastructure, interface e bootst
 
 As classes de domínio têm construtor privado ou protegido e estado encapsulado. Factories como create/from validam uma criação ou transição nova; rehydrate apenas recompõe o estado já validado e persistido, sem repetir regras de transição. Não há setters públicos para contornar Wallet, WagerTransaction ou WalletLedgerEntry.
 
-O README §6.5 esboça InboxMessage e OutboxMessage como classes com transições próprias. Aqui elas não existem. InboxMessage é o DTO de InboxRepository; a linha da outbox é escrita por OutboxRepository.enqueue e drenada por OutboxClaimRepository. A escolha vale só para essas duas. Elegibilidade, backoff e posse de um item são decididos no SQL do claim, porque é lá que a corrida entre publishers acontece: a elegibilidade é a cláusula WHERE sob FOR UPDATE SKIP LOCKED, a posse é a condição `claimed_by = :publisherId` em toda escrita seguinte, e o incremento de tentativa é `attempts + 1` no próprio UPDATE. Uma classe em memória repetiria essas condições em TypeScript sem efeito sobre a corrida, e a linha continuaria dependendo do SQL. As duas garantias ficam no schema: PRIMARY KEY (consumer_name, message_id) na inbox e a posse verificada em toda transição da outbox. Ambas têm teste de integração.
+O README §6.5 esboça InboxMessage e OutboxMessage como classes com transições próprias. Aqui elas não existem. InboxMessage é o DTO de InboxRepository; a linha da outbox é escrita por OutboxRepository.enqueue e drenada por OutboxClaimRepository. A escolha vale só para essas duas. Elegibilidade, backoff e posse de um item são decididos no SQL do claim, porque é lá que a corrida entre publishers acontece: a elegibilidade é a cláusula WHERE sob FOR UPDATE SKIP LOCKED, a posse é a condição `claimed_by = :publisherId` em toda escrita seguinte, e o incremento de tentativa é `attempts + 1` no próprio UPDATE. Uma classe em memória repetiria essas condições em TypeScript sem efeito sobre a corrida, e a linha continuaria dependendo do SQL. As duas garantias ficam no schema: PRIMARY KEY (consumer_name, provider_id, message_id) na inbox e a posse verificada em toda transição da outbox. Ambas têm teste de integração.
 
 ### 3.1 Money sem ponto flutuante
 
@@ -332,9 +332,9 @@ O consumer lê `wager-transactions.fifo` e aceita o envelope `WagerTransactionRe
 
 Inbox deduplica entregas de transporte por:
 
-    PRIMARY KEY (consumer_name, message_id)
+    PRIMARY KEY (consumer_name, provider_id, message_id)
 
-consumerName é wager-transactions-consumer. messageId é o campo autoral do envelope; o broker MessageId é guardado separadamente apenas para diagnóstico. O contrato assume que messageId é globalmente único dentro desse consumidor lógico.
+consumerName é wager-transactions-consumer. messageId é o campo autoral do envelope, escolhido pelo produtor; o broker MessageId é guardado separadamente apenas para diagnóstico. providerId entra na chave porque a numeração é do produtor: sem ele, dois provedores que numerem as próprias mensagens colidem, e o segundo é mandado à DLQ como conflito de payload que ele nunca causou. Dentro de um mesmo provider, messageId repetido com conteúdo diferente continua sendo conflito.
 
 O inboxPayloadHash é diferente do business payloadHash. Ele cobre type, occurredAt e data completa já canonizada, incluindo idempotencyKey, e exclui metadata do broker.
 
@@ -514,8 +514,10 @@ Consultas:
 
 - GET /wallets/:walletId;
 - GET /wallets/:walletId/ledger;
-- GET /wagering/transactions/:transactionId;
+- GET /wagering/transactions/:transactionId, com o header `X-Provider-Id`;
 - GET /providers/:providerId/wagering/transactions/:externalTransactionId.
+
+As duas consultas de Wager passam pelo `ProviderIdentityPort` e só devolvem transação daquele provider. A primeira não carrega provider no caminho, então ele vem no header; sem ele a resposta é 400. Transação de outro provider responde 404, e não 403, porque distinguir “não existe” de “existe e não é sua” já entrega a existência do id.
 
 O cursor do ledger é base64url opaco de createdAt+id. A busca usa keyset por (created_at,id) descendente e não depende da ordenação do UUID v7. limit tem default 50, mínimo 1 e máximo 200.
 
@@ -678,11 +680,11 @@ O método completo, o que cada perfil prova, o que a validação confere e os li
 
 - A saída é at-least-once; consumidores deduplicam eventId, e publishers concorrentes podem inverter a ordem de ocorrência.
 - Retry bloqueia o grupo FIFO da Wallet; uma falha prolongada pode levar mensagem válida à DLQ e exigir redrive.
-- messageId globalmente único é obrigação do produtor; crash entre send da DLQ e delete da origem ainda pode duplicar a mensagem.
+- messageId único dentro do próprio provider é obrigação do produtor; a chave da Inbox inclui `provider_id`, então um provider não invalida a numeração de outro. Crash entre send da DLQ e delete da origem ainda pode duplicar a mensagem.
 - numeric(20,2) tem teto finito, e a reconciliação síncrona cresce com o histórico do ledger.
 - Inbox e Outbox crescem indefinidamente: como a role de runtime não tem DELETE, qualquer purga exige a credencial de manutenção, e a política de retenção fica fora desta entrega.
 - Triggers e privilégios protegem a role da aplicação, não uma credencial de migration ou superuser.
-- Autenticação funcional foi omitida. `ProviderIdentityPort` existe e está no caminho da submissão HTTP, mas o adapter atual confia na identidade declarada: qualquer chamador pode afirmar qualquer `providerId`.
+- Autenticação funcional foi omitida. `ProviderIdentityPort` existe e está no caminho da submissão HTTP e das duas consultas de transação, que passaram a ser escopadas pelo provider resolvido — dono errado responde 404, nunca 403, porque o próprio status confirmaria a existência do id. O adapter atual confia na identidade declarada, no corpo para a submissão e no header `X-Provider-Id` para a leitura: qualquer chamador pode afirmar qualquer `providerId`. Trocar o adapter por um que introspecte o token do IdP fecha as três superfícies de uma vez.
 - OpenTelemetry não foi implementado; `bun run test:load` mede HTTP, SQL e Prometheus sem traces.
 - Os três Gauges operacionais são amostrados a cada 15 s por processo e aparecem repetidos por instância. Depois de uma falha de coleta, a última amostra permanece exposta sem garantia de freshness até uma coleta voltar a funcionar.
 - Uma referência com reversão vigente recusa qualquer outra até que a vigente seja revertida, o que também recusa um ROLLBACK legítimo enquanto um REFUND indevido está de pé; desfazer exige o ROLLBACK do REFUND primeiro.

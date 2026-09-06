@@ -55,18 +55,35 @@ describe('TST-022 unicidade', () => {
     expect(rows.map((row) => row.currency)).toEqual(['BRL', 'USD']);
   });
 
-  test('a mesma mensagem para o mesmo consumidor colide na inbox', async () => {
+  test('a mesma mensagem do mesmo provider para o mesmo consumidor colide na inbox', async () => {
     const messageId = `msg-${uniqueSuffix()}`;
-    const insert = (): Promise<unknown> => migrator`
-      INSERT INTO inbox_message (consumer_name, message_id, payload_hash, received_at)
-      VALUES ('wager-transactions-consumer', ${messageId}, ${'b'.repeat(64)}, now())
+    const insert = (providerId: string): Promise<unknown> => migrator`
+      INSERT INTO inbox_message (consumer_name, provider_id, message_id, payload_hash, received_at)
+      VALUES ('wager-transactions-consumer', ${providerId}, ${messageId}, ${'b'.repeat(64)}, now())
     `;
 
-    await insert();
-    const failure = await expectSqlFailure(insert);
+    await insert('provider-a');
+    const failure = await expectSqlFailure(() => insert('provider-a'));
 
     expect(failure.sqlstate).toBe('23505');
     expect(failure.message).toContain('inbox_message_pk');
+  });
+
+  test('o mesmo messageId de outro provider é linha legítima', async () => {
+    const messageId = `msg-${uniqueSuffix()}`;
+    const insert = (providerId: string): Promise<unknown> => migrator`
+      INSERT INTO inbox_message (consumer_name, provider_id, message_id, payload_hash, received_at)
+      VALUES ('wager-transactions-consumer', ${providerId}, ${messageId}, ${'b'.repeat(64)}, now())
+    `;
+
+    await insert('provider-a');
+    await insert('provider-b');
+
+    const rows = (await migrator`
+      SELECT provider_id FROM inbox_message
+      WHERE message_id = ${messageId} ORDER BY provider_id
+    `) as { provider_id: string }[];
+    expect(rows.map((row) => row.provider_id)).toEqual(['provider-a', 'provider-b']);
   });
 
   test('um segundo lançamento para a mesma transação e wallet colide', async () => {
@@ -368,8 +385,8 @@ describe('TST-022 imutabilidade', () => {
   test('a identidade da inbox não pode ser reescrita', async () => {
     const messageId = `msg-${uniqueSuffix()}`;
     await migrator`
-      INSERT INTO inbox_message (consumer_name, message_id, payload_hash, received_at)
-      VALUES ('wager-transactions-consumer', ${messageId}, ${'c'.repeat(64)}, now())
+      INSERT INTO inbox_message (consumer_name, provider_id, message_id, payload_hash, received_at)
+      VALUES ('wager-transactions-consumer', 'provider-a', ${messageId}, ${'c'.repeat(64)}, now())
     `;
 
     const failure = await expectSqlFailure(

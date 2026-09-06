@@ -74,9 +74,13 @@ export interface OutboxRepository {
   enqueue(events: readonly IntegrationEvent<unknown>[], now: Date): Promise<void>;
 }
 
-export interface InboxMessage {
+export interface InboxKey {
   readonly consumerName: string;
+  readonly providerId: string;
   readonly messageId: string;
+}
+
+export interface InboxMessage extends InboxKey {
   readonly payloadHash: string;
   readonly brokerMessageId?: string | undefined;
   readonly receivedAt: Date;
@@ -85,8 +89,8 @@ export interface InboxMessage {
 
 export interface InboxRepository {
   reserve(message: InboxMessage): Promise<InboxMessage | undefined>;
-  find(consumerName: string, messageId: string): Promise<InboxMessage | undefined>;
-  markProcessed(consumerName: string, messageId: string, processedAt: Date): Promise<void>;
+  find(key: InboxKey): Promise<InboxMessage | undefined>;
+  markProcessed(key: InboxKey, processedAt: Date): Promise<void>;
 }
 
 export interface PublishableMessage {

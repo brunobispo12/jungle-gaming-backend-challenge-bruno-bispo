@@ -2,6 +2,7 @@ import { ApplicationError, ErrorCode } from '@/application/errors';
 import {
   NOOP_METRICS,
   type Clock,
+  type InboxKey,
   type MetricsPort,
   type Repositories,
   type UnitOfWork,
@@ -15,6 +16,7 @@ import type {
 
 export interface InboxDelivery {
   readonly consumerName: string;
+  readonly providerId: string;
   readonly messageId: string;
   readonly payloadHash: string;
   readonly brokerMessageId?: string | undefined;
@@ -59,11 +61,7 @@ export class ConsumeWagerMessageUseCase {
         }
 
         const result = await this.submitWager.executeWithin(repositories, command);
-        await repositories.inbox.markProcessed(
-          delivery.consumerName,
-          delivery.messageId,
-          this.clock.now(),
-        );
+        await repositories.inbox.markProcessed(keyOf(delivery), this.clock.now());
 
         return { kind: 'processed', result };
       });
@@ -100,7 +98,7 @@ export class ConsumeWagerMessageUseCase {
     repositories: Repositories,
     delivery: InboxDelivery,
   ): Promise<ConsumeOutcome> {
-    const existing = await repositories.inbox.find(delivery.consumerName, delivery.messageId);
+    const existing = await repositories.inbox.find(keyOf(delivery));
 
     if (existing === undefined) {
       return { kind: 'transient', reason: 'the inbox row disappeared after a lost reservation' };
@@ -133,6 +131,14 @@ export class ConsumeWagerMessageUseCase {
 
     return { kind: 'transient', reason: messageOf(error) };
   }
+}
+
+function keyOf(delivery: InboxDelivery): InboxKey {
+  return {
+    consumerName: delivery.consumerName,
+    providerId: delivery.providerId,
+    messageId: delivery.messageId,
+  };
 }
 
 function messageOf(error: unknown): string {

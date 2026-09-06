@@ -354,8 +354,8 @@ describe('consumidor SQS contra fila real', () => {
     const { inboxPayloadHash } = parseWagerMessage(body);
 
     await sql`
-      INSERT INTO inbox_message (consumer_name, message_id, payload_hash, received_at)
-      VALUES (${CONSUMER_NAME}, ${messageId}, ${inboxPayloadHash}, now())
+      INSERT INTO inbox_message (consumer_name, provider_id, message_id, payload_hash, received_at)
+      VALUES (${CONSUMER_NAME}, 'provider-a', ${messageId}, ${inboxPayloadHash}, now())
     `;
     await sendRaw(sqs, inputUrl, body, { groupId: wallet.id, deduplicationId: messageId });
 

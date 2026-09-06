@@ -227,6 +227,7 @@ export class WagerConsumerWorker implements OnApplicationBootstrap, OnApplicatio
         outcome: await this.consume.consume(
           {
             consumerName: this.options.consumerName,
+            providerId: parsed.command.providerId,
             messageId: parsed.messageId,
             payloadHash: parsed.inboxPayloadHash,
             brokerMessageId: message.MessageId,

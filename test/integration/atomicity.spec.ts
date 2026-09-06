@@ -16,6 +16,7 @@ import { bootUseCases, type UseCases } from './support/use-cases';
 
 const AT = new Date('2026-07-29T15:00:00.000Z');
 const CONSUMER = 'atomicity-consumer';
+const PROVIDER = 'provider-a';
 
 // What opening a wallet with a positive balance leaves behind: the OPENING wager,
 // its ledger entry, and the two events that describe it.
@@ -158,6 +159,7 @@ describe('TST-023 atomicidade entre wallet, wager, ledger, inbox e outbox', () =
       app.unitOfWork.transactional(async (repositories) => {
         const reserved = await repositories.inbox.reserve({
           consumerName: CONSUMER,
+          providerId: PROVIDER,
           messageId,
           payloadHash: 'a'.repeat(64),
           receivedAt: AT,
@@ -165,7 +167,7 @@ describe('TST-023 atomicidade entre wallet, wager, ledger, inbox e outbox', () =
         expect(reserved).toBeDefined();
 
         await app.submitWager.executeWithin(repositories, command(wallet));
-        await repositories.inbox.markProcessed(CONSUMER, messageId, AT);
+        await repositories.inbox.markProcessed({ consumerName: CONSUMER, providerId: PROVIDER, messageId }, AT);
 
         throw new Error('falha depois de reservar a inbox e aplicar o efeito');
       }),
@@ -181,12 +183,13 @@ describe('TST-023 atomicidade entre wallet, wager, ledger, inbox e outbox', () =
     await app.unitOfWork.transactional(async (repositories) => {
       await repositories.inbox.reserve({
         consumerName: CONSUMER,
+        providerId: PROVIDER,
         messageId,
         payloadHash: 'b'.repeat(64),
         receivedAt: AT,
       });
       await app.submitWager.executeWithin(repositories, command(wallet));
-      await repositories.inbox.markProcessed(CONSUMER, messageId, AT);
+      await repositories.inbox.markProcessed({ consumerName: CONSUMER, providerId: PROVIDER, messageId }, AT);
     });
 
     expect(await residueOf(wallet.id, messageId)).toEqual({

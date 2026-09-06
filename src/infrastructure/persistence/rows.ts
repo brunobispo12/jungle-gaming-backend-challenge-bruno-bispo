@@ -55,6 +55,7 @@ export interface WalletLedgerEntryRow {
 
 export interface InboxMessageRow {
   consumerName: string;
+  providerId: string;
   messageId: string;
   payloadHash: string;
   brokerMessageId: string | null;
@@ -157,6 +158,7 @@ export const inboxMessageSchema = new EntitySchema<InboxMessageRow>({
   tableName: 'inbox_message',
   properties: {
     consumerName: { type: 'string', fieldName: 'consumer_name', primary: true },
+    providerId: { type: 'string', fieldName: 'provider_id', primary: true },
     messageId: { type: 'string', fieldName: 'message_id', primary: true },
     payloadHash: { type: 'string', fieldName: 'payload_hash', columnType: 'char(64)' },
     brokerMessageId: { type: 'string', fieldName: 'broker_message_id', nullable: true },

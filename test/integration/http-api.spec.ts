@@ -433,7 +433,9 @@ describe('API HTTP contra PostgreSQL real', () => {
     expect(wallet.status).toBe(404);
     expect(((await wallet.json()) as ErrorResponse).error.code).toBe('RESOURCE_NOT_FOUND');
 
-    const transaction = await fetch(`${baseUrl}/wagering/transactions/${uuid()}`);
+    const transaction = await fetch(`${baseUrl}/wagering/transactions/${uuid()}`, {
+      headers: { 'x-provider-id': 'provider-http' },
+    });
     expect(transaction.status).toBe(404);
 
     const byProvider = await fetch(
@@ -448,7 +450,9 @@ describe('API HTTP contra PostgreSQL real', () => {
     const submitted = await submitWager(body);
     expect(submitted.status).toBe(201);
 
-    const byId = await fetch(`${baseUrl}/wagering/transactions/${submitted.body.transactionId}`);
+    const byId = await fetch(`${baseUrl}/wagering/transactions/${submitted.body.transactionId}`, {
+      headers: { 'x-provider-id': body['providerId'] as string },
+    });
     const byProvider = await fetch(
       `${baseUrl}/providers/${body['providerId'] as string}` +
         `/wagering/transactions/${body['externalTransactionId'] as string}`,

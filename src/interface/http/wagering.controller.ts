@@ -218,19 +218,32 @@ export class WageringController {
     return result;
   }
 
+  // A transaction is a provider's own record, so the reader has to say which
+  // provider it is. Owned by someone else answers 404, never 403: the status
+  // itself would confirm the id exists.
   @Get('wagering/transactions/:transactionId')
-  async getTransaction(@Param('transactionId') transactionId: string): Promise<unknown> {
+  async getTransaction(
+    @Param('transactionId') transactionId: string,
+    @Headers('x-provider-id') declaredProviderId: string | undefined,
+    @Headers('authorization') authorization: string | undefined,
+  ): Promise<unknown> {
     const validTransactionId = requireUuid(transactionId, 'transactionId');
+    const identity = await this.providerIdentity.resolve(
+      { authorization },
+      boundedString(declaredProviderId, 'X-Provider-Id', 64),
+    );
+
     const found = await this.unitOfWork.readOnly((repositories) =>
       repositories.wagerTransactions.findById(validTransactionId),
     );
-    return transactionView(mustExist(found));
+    return transactionView(mustBeOwnedBy(found, identity.providerId));
   }
 
   @Get('providers/:providerId/wagering/transactions/:externalTransactionId')
   async getTransactionByProvider(
     @Param('providerId') providerId: string,
     @Param('externalTransactionId') externalTransactionId: string,
+    @Headers('authorization') authorization: string | undefined,
   ): Promise<unknown> {
     const validProviderId = boundedString(providerId, 'providerId', 64);
     const validExternalId = boundedString(
@@ -238,10 +251,12 @@ export class WageringController {
       'externalTransactionId',
       128,
     );
+    const identity = await this.providerIdentity.resolve({ authorization }, validProviderId);
+
     const found = await this.unitOfWork.readOnly((repositories) =>
-      repositories.wagerTransactions.findByExternalId(validProviderId, validExternalId),
+      repositories.wagerTransactions.findByExternalId(identity.providerId, validExternalId),
     );
-    return transactionView(mustExist(found));
+    return transactionView(mustBeOwnedBy(found, identity.providerId));
   }
 }
 
@@ -256,8 +271,11 @@ function countHeader(request: Request, name: string): number {
   return seen;
 }
 
-function mustExist(transaction: WagerTransaction | undefined): WagerTransaction {
-  if (!transaction) {
+function mustBeOwnedBy(
+  transaction: WagerTransaction | undefined,
+  providerId: string,
+): WagerTransaction {
+  if (!transaction || transaction.providerId !== providerId) {
     throw new ApplicationError(ErrorCode.ResourceNotFound, 'transaction not found');
   }
   return transaction;

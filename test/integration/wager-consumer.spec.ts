@@ -70,6 +70,7 @@ function delivery(overrides: Partial<InboxDelivery> = {}): InboxDelivery {
   const suffix = uniqueSuffix();
   return {
     consumerName: CONSUMER_NAME,
+    providerId: 'provider-a',
     messageId: `msg-${suffix}`,
     payloadHash: 'a'.repeat(64),
     brokerMessageId: `broker-${suffix}`,
@@ -237,13 +238,35 @@ describe('consumo de mensagem com inbox', () => {
     expect(await balanceOf(wallet.id)).toBe('975.00');
   });
 
+  test('o mesmo messageId de outro provider é entrega nova, não conflito', async () => {
+    const first = await openWallet('1000.00');
+    const second = await openWallet('1000.00');
+    const shared = `msg-${uniqueSuffix()}`;
+
+    const one = command(first, { providerId: 'provider-um' });
+    const two = command(second, { providerId: 'provider-dois' });
+
+    const applied = await app.consumeWagerMessage.consume(
+      delivery({ providerId: 'provider-um', messageId: shared, payloadHash: 'c'.repeat(64) }),
+      one,
+    );
+    const other = await app.consumeWagerMessage.consume(
+      delivery({ providerId: 'provider-dois', messageId: shared, payloadHash: 'd'.repeat(64) }),
+      two,
+    );
+
+    expect(applied.kind).toBe('processed');
+    expect(other.kind).toBe('processed');
+    expect(await wagerCount(two.providerId, two.externalTransactionId)).toBe(1);
+  });
+
   test('inbox reservada sem processamento é tratada como falha transitória', async () => {
     const wallet = await openWallet('1000.00');
     const message = delivery();
 
     await sql`
-      INSERT INTO inbox_message (consumer_name, message_id, payload_hash, broker_message_id, received_at)
-      VALUES (${message.consumerName}, ${message.messageId}, ${message.payloadHash},
+      INSERT INTO inbox_message (consumer_name, provider_id, message_id, payload_hash, broker_message_id, received_at)
+      VALUES (${message.consumerName}, ${message.providerId}, ${message.messageId}, ${message.payloadHash},
               ${message.brokerMessageId ?? null}, now())
     `;
 
