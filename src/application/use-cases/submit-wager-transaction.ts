@@ -17,7 +17,7 @@ import {
 } from '@/application/ports';
 import { FailureCode } from '@/domain/failure-code';
 import { Money, type MoneyProps } from '@/domain/money';
-import { reversalFailure, winReferenceFailure } from '@/domain/reference';
+import { referenceIsSettled, reversalFailure, winReferenceFailure } from '@/domain/reference';
 import {
   WagerTransaction,
   WagerTransactionKind,
@@ -223,7 +223,7 @@ export class SubmitWagerTransactionUseCase {
       transaction.providerId,
       external,
     );
-    if (!reference) {
+    if (!reference || !isDecidable(transaction, reference)) {
       return {};
     }
 
@@ -243,7 +243,7 @@ export class SubmitWagerTransactionUseCase {
       transaction.referenceExternalTransactionId ?? '',
     );
 
-    if (!reference) {
+    if (!reference || !isDecidable(transaction, reference)) {
       transaction.markPendingReference({
         resultBalance: wallet.balance,
         nextAttemptAt: new Date(now.getTime() + FIRST_RETRY_DELAY_MS),
@@ -365,6 +365,11 @@ export class SubmitWagerTransactionUseCase {
     await repositories.outbox.enqueue([WagerTransactionRejected.from(transaction, context)], now);
     return resultOf(transaction, false);
   }
+}
+
+// A transaction pointing at itself never settles: waiting would wait forever.
+function isDecidable(transaction: WagerTransaction, reference: WagerTransaction): boolean {
+  return reference.id === transaction.id || referenceIsSettled(reference);
 }
 
 function resultOf(transaction: WagerTransaction, idempotentReplay: boolean): SubmitWagerResult {

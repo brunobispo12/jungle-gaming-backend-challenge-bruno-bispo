@@ -26,6 +26,10 @@ function bindingFailure(
   return undefined;
 }
 
+export function referenceIsSettled(reference: WagerTransaction): boolean {
+  return reference.isTerminal();
+}
+
 export function reversalFailure(
   reversal: WagerTransaction,
   reference: WagerTransaction,

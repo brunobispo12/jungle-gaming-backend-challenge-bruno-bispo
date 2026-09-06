@@ -9,6 +9,7 @@ import {
   type UnitOfWork,
 } from '@/application/ports';
 import { FailureCode } from '@/domain/failure-code';
+import { referenceIsSettled } from '@/domain/reference';
 import type { WagerTransaction, WagerTransactionStatus } from '@/domain/wager-transaction';
 import type { SubmitWagerTransactionUseCase } from './submit-wager-transaction';
 
@@ -69,7 +70,7 @@ export class ResolvePendingReferenceUseCase {
           attemptedKind = pending.kind;
 
           const reference = await this.findReference(repositories, pending);
-          if (reference === undefined && !isExhausted(pending, now)) {
+          if (!isResolvable(reference) && !isExhausted(pending, now)) {
             return this.reschedule(repositories, pending, now);
           }
 
@@ -198,9 +199,12 @@ export class ResolvePendingReferenceUseCase {
     // Re-read under the wallet lock: the reference may have landed while this
     // tick waited, and an expired pending still deserves the normal processing.
     const reference = await this.findReference(repositories, pending);
-    if (reference === undefined) {
+    if (!isResolvable(reference)) {
       pending.reject({
-        code: FailureCode.ReferenceNotFound,
+        code:
+          reference === undefined
+            ? FailureCode.ReferenceNotFound
+            : FailureCode.ReferenceNotProcessed,
         resultBalance: wallet.balance,
         at: now,
       });
@@ -246,6 +250,10 @@ export class ResolvePendingReferenceUseCase {
       failureCode: pending.failureCode,
     };
   }
+}
+
+function isResolvable(reference: WagerTransaction | undefined): reference is WagerTransaction {
+  return reference !== undefined && referenceIsSettled(reference);
 }
 
 function isExhausted(pending: WagerTransaction, now: Date): boolean {

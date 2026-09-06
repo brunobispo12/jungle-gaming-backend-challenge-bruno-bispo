@@ -14,7 +14,7 @@ O documento é longo porque cada decisão delegada pelo desafio recebe justifica
 4. `Idempotency-Key` é a fonte da verdade, `payloadHash` é SHA-256 de JSON canônico, e o replay devolve o saldo histórico gravado com a transação → [§6](#6-idempotência-e-replay)
 5. Inbox, efeito financeiro, ledger e Outbox commitam juntos; o publisher usa claim com `FOR UPDATE SKIP LOCKED` e lease, e a entrega é at-least-once → [§7](#7-inbox-e-consumer-sqs), [§9](#9-transactional-outbox-e-eventos)
 6. O consumer dá ACK só depois do commit, envia à DLQ antes de apagar a origem e reinicia a visibilidade por mensagem do lote → [§7.2](#72-fifo-retry-e-shutdown)
-7. Referência ausente vira `PENDING_REFERENCE`; o worker roda sem líder, segura o row lock sem lease e encerra em 6 h ou 100 tentativas → [§8](#8-pending-references-e-reversões)
+7. Referência ausente ou ainda não liquidada vira `PENDING_REFERENCE`; o worker roda sem líder, segura o row lock sem lease e encerra em 6 h ou 100 tentativas → [§8](#8-pending-references-e-reversões)
 8. Uma referência tem no máximo uma reversão vigente, de qualquer tipo, e a vaga reabre quando essa reversão é revertida; o trigger `wager_reversal_guard` fecha a corrida → [§3.5](#35-reversões--uma-vaga-por-referência)
 9. Reconciliação lê saldo e ledger no mesmo snapshot e nunca corrige → [§11](#11-reconciliação)
 10. `InboxMessage` e `OutboxMessage` não são agregados: o que encapsulariam é decidido no SQL do claim → [§3](#3-money-e-domínio)
@@ -390,7 +390,7 @@ O consumer é ativado apenas nas instâncias configuradas para o papel de worker
 
 ## 8. Pending references e reversões
 
-Para REFUND ou ROLLBACK, referência ausente significa que referenceExternalTransactionId foi fornecido, mas a transação ainda não existe. WIN mantém a escolha da seção 3.4: sua referência é opcional e, se ainda não existir, segue sem vínculo interno.
+Para REFUND ou ROLLBACK, referência pendente significa que referenceExternalTransactionId foi fornecido e a transação ainda não existe **ou** existe e ainda não liquidou. Os dois casos esperam pelo mesmo motivo: a operação chegou antes da referência. Rejeitar a segunda com REFERENCE_NOT_PROCESSED perderia em definitivo o ROLLBACK de um REFUND que ainda estava pendente, que é a cadeia que a entrega fora de ordem produz. WIN mantém a escolha da seção 3.4: sua referência é opcional e, enquanto não existir ou não liquidar, segue sem vínculo interno.
 
 Na submissão, a transação reserva a Wager, trava a Wallet e grava PENDING_REFERENCE com attempts=0, expiresAt=createdAt+6h, primeira tentativa em aproximadamente 5 s e resultBalance do aceite. O evento WagerTransactionPendingReference entra na mesma Outbox; depois do commit, HTTP responde 202 ou o consumer envia ACK.
 
@@ -413,6 +413,8 @@ Essa é a diferença para a Outbox: o pending worker pode manter o row lock porq
 Se ocorrer uma falha determinística permanente, a tentativa original faz rollback. Uma transação curta posterior trava a mesma Wager e a Wallet, confirma PENDING_REFERENCE, grava snapshot, INFRASTRUCTURE_FAILURE, processedAt e FAILED. Referências terminais continuam imutáveis.
 
 A regra da vaga única também vale no worker: a resolução tardia passa pelo mesmo `applyResolvedReversal`, consulta `hasActiveReversal` sob o lock da Wallet, e o trigger é a última barreira contra concorrência.
+
+Uma referência que existe mas ainda não liquidou não é referência errada, é referência adiantada. Uma reversão que aponta para uma transação em PENDING ou PENDING_REFERENCE também fica PENDING_REFERENCE, em vez de ser rejeitada com REFERENCE_NOT_PROCESSED. Sem isso, uma cadeia BET → REFUND → ROLLBACK(REFUND) entregue fora de ordem perderia o ROLLBACK em definitivo, que é exatamente o que o §7.8 existe para evitar. REFERENCE_NOT_PROCESSED continua sendo a rejeição quando a referência chegou a um estado terminal que não é PROCESSED, e quando o TTL expira com ela ainda pendente. Uma transação que aponta para si mesma nunca liquida e é decidida na hora pelas regras de referência, nunca posta em espera.
 
 ## 9. Transactional Outbox e eventos
 
@@ -677,6 +679,6 @@ O método completo, o que cada perfil prova, o que a validação confere e os li
 - OpenTelemetry não foi implementado; `bun run test:load` mede HTTP, SQL e Prometheus sem traces.
 - Os três Gauges operacionais são amostrados a cada 15 s por processo e aparecem repetidos por instância. Depois de uma falha de coleta, a última amostra permanece exposta sem garantia de freshness até uma coleta voltar a funcionar.
 - Uma referência com reversão vigente recusa qualquer outra até que a vigente seja revertida, o que também recusa um ROLLBACK legítimo enquanto um REFUND indevido está de pé; desfazer exige o ROLLBACK do REFUND primeiro.
-- Uma referência opcional de WIN que ainda não existe não transforma a operação em PENDING_REFERENCE.
+- Uma referência opcional de WIN que ainda não existe, ou que ainda não liquidou, não transforma a operação em PENDING_REFERENCE: o vínculo simplesmente não é gravado.
 - O gerador e a aplicação compartilham a máquina no setup local; contenção com Docker e outros processos influencia os números. O relatório registra esse ambiente, sem convertê-lo em promessa de capacidade.
 - Resultados do teste de carga valem para o ambiente e workload documentados, não como promessa geral de capacidade.
